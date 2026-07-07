@@ -1,0 +1,48 @@
+# ===== Python / Backend =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# ===== 数据目录（含数据库、上传文件、向量库、模型文件）=====
+backend/data/
+backend/.env
+
+# ===== Frontend =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== 测试 / 覆盖率 =====
+.coverage
+htmlcov/
+.pytest_cache/
+coverage/
+
+# ===== 临时文件 =====
+*.tmp
+*.bak
+*.cache

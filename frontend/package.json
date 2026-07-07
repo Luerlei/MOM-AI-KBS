@@ -1,0 +1,40 @@
+{
+  "name": "mom-ai-knowledge-base",
+  "version": "1.0.0",
+  "description": "MOM系统AI知识库平台前端",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "type-check": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@ant-design/icons-vue": "^7.0.1",
+    "ant-design-vue": "^4.2.3",
+    "axios": "^1.7.2",
+    "dayjs": "^1.11.11",
+    "echarts": "^5.5.0",
+    "markdown-it": "^14.1.0",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.27",
+    "vue-echarts": "^7.0.3",
+    "vue-router": "^4.3.2"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^28.0.3",
+    "@types/markdown-it": "^14.1.1",
+    "@types/node": "^20.12.12",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "@vitest/coverage-v8": "^4.1.9",
+    "@vue/test-utils": "^2.4.11",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11",
+    "vitest": "^4.1.9",
+    "vue-tsc": "^2.0.19"
+  }
+}
