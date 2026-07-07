@@ -2,8 +2,9 @@
 import json
 
 from app.database import SessionLocal
-from app.models import Category, Tag, Skill
+from app.models import Category, Tag, Skill, ModelConfig
 from app.services.skill_option_service import seed_options
+from app.utils.crypto import encrypt
 
 
 # 分类定义：(id, name)
@@ -79,6 +80,28 @@ INITIAL_SKILLS = [
 ]
 
 
+# 预制 Forecast 时序预测模型配置（Chronos-2 / TimesFM 2.5 本地推理服务示例）
+# 约定各推理服务暴露统一 POST /predict 端点
+INITIAL_FORECAST_MODELS = [
+    {
+        "name": "Chronos-2 (本地)",
+        "type": "Forecast",
+        "api_url": "http://localhost:8501",
+        "api_key": "",
+        "model_name": "amazon/chronos-bolt-base",
+        "is_active": False,
+    },
+    {
+        "name": "TimesFM 2.5 (本地)",
+        "type": "Forecast",
+        "api_url": "http://localhost:8502",
+        "api_key": "",
+        "model_name": "google/timesfm-2.0-200m-pytorch",
+        "is_active": False,
+    },
+]
+
+
 def seed_initial_data():
     """系统启动时调用：创建预制数据（仅在不存在时创建）"""
     db = SessionLocal()
@@ -120,6 +143,23 @@ def seed_initial_data():
 
         # 4. 创建预制 Skill 分类/功能选项
         seed_options(db)
+
+        # 5. 创建预制 Forecast 时序预测模型配置
+        for fdef in INITIAL_FORECAST_MODELS:
+            existing = db.query(ModelConfig).filter(
+                ModelConfig.name == fdef["name"], ModelConfig.type == "Forecast"
+            ).first()
+            if not existing:
+                fc = ModelConfig(
+                    name=fdef["name"],
+                    type=fdef["type"],
+                    api_url=fdef["api_url"],
+                    api_key=encrypt(fdef["api_key"]) if fdef["api_key"] else "",
+                    model_name=fdef["model_name"],
+                    is_active=fdef["is_active"],
+                )
+                db.add(fc)
+        db.commit()
     except Exception as e:
         # 初始化失败不应阻塞启动
         print(f"[seed] 初始化预制数据时出错: {e}")

@@ -13,7 +13,7 @@ vi.mock('pinia', () => ({
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     collapsed: ref(false),
-    modelStatus: ref({ llm: null, embedding: null }),
+    modelStatus: ref({ llm: null, embedding: null, forecast: null }),
     needsGuide: ref(false),
     loaded: ref(true),
     toggleCollapsed: vi.fn(),

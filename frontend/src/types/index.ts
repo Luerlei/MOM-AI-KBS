@@ -192,7 +192,7 @@ export interface SkillTestResult {
 /**
  * 模型类型
  */
-export type ModelType = 'LLM' | 'Embedding'
+export type ModelType = 'LLM' | 'Embedding' | 'Forecast'
 
 /**
  * 模型配置
@@ -222,6 +222,7 @@ export interface ModelStatusItem {
 export interface ModelStatus {
   llm: ModelStatusItem | null
   embedding: ModelStatusItem | null
+  forecast: ModelStatusItem | null
 }
 
 /**

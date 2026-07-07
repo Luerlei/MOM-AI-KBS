@@ -112,6 +112,62 @@
       />
     </a-card>
 
+    <!-- Forecast 时序预测模型 -->
+    <a-card title="Forecast 时序预测模型配置" style="margin-bottom: 16px">
+      <template #extra>
+        <a-button type="primary" @click="openCreateModal('Forecast')">
+          <PlusOutlined />新增 Forecast
+        </a-button>
+      </template>
+      <a-table
+        :columns="columns"
+        :data-source="forecastModels"
+        :loading="loading"
+        row-key="id"
+        :pagination="false"
+        size="middle"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <span class="model-name">{{ record.name }}</span>
+          </template>
+          <template v-else-if="column.key === 'model_name'">
+            <a-tag color="green">{{ record.model_name }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'api_url'">
+            <span class="api-url">{{ record.api_url }}</span>
+          </template>
+          <template v-else-if="column.key === 'is_active'">
+            <a-switch
+              :checked="record.is_active"
+              :loading="record._activating"
+              @change="onActivate(record)"
+            />
+          </template>
+          <template v-else-if="column.key === 'action'">
+            <a-space>
+              <a-button
+                type="link"
+                size="small"
+                :loading="record._testing"
+                @click="onTest(record)"
+              >
+                测试
+              </a-button>
+              <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
+              <a-popconfirm title="确定删除该模型配置?" @confirm="handleDelete(record.id)">
+                <a-button type="link" size="small" danger>删除</a-button>
+              </a-popconfirm>
+            </a-space>
+          </template>
+        </template>
+      </a-table>
+      <a-empty
+        v-if="!loading && forecastModels.length === 0"
+        description="尚未配置 Forecast 模型，点击右上角新增"
+      />
+    </a-card>
+
     <!-- 编辑/新增弹窗 -->
     <a-modal
       v-model:open="formVisible"
@@ -128,19 +184,32 @@
           <a-radio-group v-model:value="form.type" :disabled="!!editingId">
             <a-radio value="LLM">LLM 大语言模型</a-radio>
             <a-radio value="Embedding">Embedding 向量模型</a-radio>
+            <a-radio value="Forecast">Forecast 时序预测模型</a-radio>
           </a-radio-group>
         </a-form-item>
         <a-form-item label="API 地址" name="api_url">
-          <a-input v-model:value="form.api_url" placeholder="例如：https://api.openai.com/v1" />
+          <a-input
+            v-model:value="form.api_url"
+            :placeholder="form.type === 'Forecast'
+              ? '例如：http://localhost:8501（本地推理服务，暴露 /predict 端点）'
+              : '例如：https://api.openai.com/v1'"
+          />
         </a-form-item>
         <a-form-item label="API Key" name="api_key">
           <a-input-password
             v-model:value="form.api_key"
-            :placeholder="editingId ? '留空表示不修改' : '请输入 API Key'"
+            :placeholder="form.type === 'Forecast'
+              ? (editingId ? '留空表示不修改' : '本地部署可留空')
+              : (editingId ? '留空表示不修改' : '请输入 API Key')"
           />
         </a-form-item>
         <a-form-item label="模型名称" name="model_name">
-          <a-input v-model:value="form.model_name" placeholder="例如：gpt-4 / qwen-plus" />
+          <a-input
+            v-model:value="form.model_name"
+            :placeholder="form.type === 'Forecast'
+              ? '例如：amazon/chronos-bolt-base / google/timesfm-2.0-200m-pytorch'
+              : '例如：gpt-4 / qwen-plus'"
+          />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -195,6 +264,8 @@ const llmModels = computed(() => modelList.value.filter((m) => m.type === 'LLM')
 
 const embeddingModels = computed(() => modelList.value.filter((m) => m.type === 'Embedding'))
 
+const forecastModels = computed(() => modelList.value.filter((m) => m.type === 'Forecast'))
+
 // 表单
 const formRef = ref<FormInstance>()
 const formVisible = ref(false)
@@ -213,13 +284,15 @@ const form = ref<{
   model_name: ''
 })
 
-const formRules = {
+const formRules = computed(() => ({
   name: [{ required: true, message: '请输入名称' }],
   type: [{ required: true, message: '请选择类型' }],
   api_url: [{ required: true, message: '请输入 API 地址' }],
-  api_key: [{ required: true, message: '请输入 API Key' }],
+  api_key: form.value.type === 'Forecast'
+    ? []
+    : [{ required: true, message: '请输入 API Key' }],
   model_name: [{ required: true, message: '请输入模型名称' }]
-}
+}))
 
 // 测试
 const testResultVisible = ref(false)

@@ -104,11 +104,29 @@ async def test_connection(db, id: int) -> ModelTestResult:
     每次测试都会记录 TokenUsage 日志（call_type=test, source=test_model）
     """
     config = get_by_id(db, id)
-    from app.services.llm_client import OpenAICompatibleClient
+    from app.services.llm_client import OpenAICompatibleClient, ForecastClient
 
-    client = OpenAICompatibleClient(config)
     start = time.time()
     try:
+        if config.type == "Forecast":
+            # 时序预测模型：发送短序列测试 /predict 端点
+            client = ForecastClient(config)
+            result = await client.predict(series=[1.0, 2.0, 3.0, 4.0, 5.0], horizon=2)
+            latency = int((time.time() - start) * 1000)
+            usage = getattr(client, "last_usage", {}) or {}
+            _log_test_usage(
+                db, config,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                latency_ms=latency,
+            )
+            return ModelTestResult(
+                success=True,
+                message=f"连接成功，模型: {result.get('model', config.model_name)}，预测 {len(result.get('forecasts', []))} 步",
+                latency_ms=latency,
+            )
+        # LLM / Embedding 走 OpenAI 兼容客户端
+        client = OpenAICompatibleClient(config)
         if config.type == "LLM":
             result = await client.chat([{"role": "user", "content": "ping"}])
             latency = int((time.time() - start) * 1000)

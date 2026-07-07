@@ -84,7 +84,8 @@ async def health_check():
         db = SessionLocal()
         llm_count = db.query(ModelConfig).filter(ModelConfig.type == "LLM").count()
         embedding_count = db.query(ModelConfig).filter(ModelConfig.type == "Embedding").count()
-        model_status = {"llm_configs": llm_count, "embedding_configs": embedding_count}
+        forecast_count = db.query(ModelConfig).filter(ModelConfig.type == "Forecast").count()
+        model_status = {"llm_configs": llm_count, "embedding_configs": embedding_count, "forecast_configs": forecast_count}
         db.close()
     except Exception:
         model_status = "error"

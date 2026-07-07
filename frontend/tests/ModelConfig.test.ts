@@ -29,7 +29,7 @@ vi.mock('@/api/model', () => ({
   deleteModel: vi.fn(() => Promise.resolve()),
   activateModel: vi.fn(() => Promise.resolve({ id: 1 })),
   testModel: vi.fn(() => Promise.resolve({ success: true, message: 'ok', latency: 50 })),
-  getModelStatus: vi.fn(() => Promise.resolve({ llm: null, embedding: null }))
+  getModelStatus: vi.fn(() => Promise.resolve({ llm: null, embedding: null, forecast: null }))
 }))
 
 // mock store
@@ -39,7 +39,7 @@ vi.mock('@/stores/app', () => ({
     toggleCollapsed: vi.fn(),
     markGuideViewed: vi.fn(),
     loadModelStatus: vi.fn(() => Promise.resolve()),
-    modelStatus: { value: { llm: null, embedding: null } },
+    modelStatus: { value: { llm: null, embedding: null, forecast: null } },
     collapsed: { value: false },
     needsGuide: { value: false },
     loaded: { value: true }
@@ -69,6 +69,7 @@ describe('ModelConfig', () => {
     const text = wrapper.text()
     expect(text).toContain('LLM 模型配置')
     expect(text).toContain('Embedding 模型配置')
+    expect(text).toContain('Forecast 时序预测模型配置')
   })
 
   it('应该渲染模型表格数据', async () => {

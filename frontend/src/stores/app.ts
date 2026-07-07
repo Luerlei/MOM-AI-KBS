@@ -8,7 +8,7 @@ import { getModelStatus } from '@/api/model'
  */
 export const useAppStore = defineStore('app', () => {
   /** 当前模型状态 */
-  const modelStatus = ref<ModelStatus>({ llm: null, embedding: null })
+  const modelStatus = ref<ModelStatus>({ llm: null, embedding: null, forecast: null })
 
   /** 是否需要首次引导 */
   const needsGuide = ref(false)
