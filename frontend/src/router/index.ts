@@ -84,6 +84,18 @@ const routes: RouteRecordRaw[] = [
         name: 'CallLogs',
         component: () => import('@/views/CallLogs.vue'),
         meta: { title: '调用日志', breadcrumb: ['首页', '调用日志'] }
+      },
+      {
+        path: 'datasets',
+        name: 'DatasetList',
+        component: () => import('@/views/dataset/List.vue'),
+        meta: { title: '数据集管理', breadcrumb: ['首页', '时序分析', '数据集管理'] }
+      },
+      {
+        path: 'trends',
+        name: 'Trends',
+        component: () => import('@/views/Trends.vue'),
+        meta: { title: '趋势分析', breadcrumb: ['首页', '时序分析', '趋势分析'] }
       }
     ]
   },

@@ -105,7 +105,7 @@ async def root():
 
 
 # 注册路由
-from app.routers import knowledge, category, tag, skill, skill_option, model_config, search, qa, dashboard, token_stats  # noqa: E402
+from app.routers import knowledge, category, tag, skill, skill_option, model_config, search, qa, dashboard, token_stats, dataset, forecast  # noqa: E402
 
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识管理"])
 app.include_router(category.router, prefix="/api/categories", tags=["分类管理"])
@@ -117,3 +117,5 @@ app.include_router(search.router, prefix="/api/search", tags=["搜索"])
 app.include_router(qa.router, prefix="/api/qa", tags=["智能问答"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["首页"])
 app.include_router(token_stats.router, prefix="/api/token-stats", tags=["Token统计"])
+app.include_router(dataset.router, prefix="/api/datasets", tags=["数据集管理"])
+app.include_router(forecast.router, prefix="/api/forecast", tags=["时序预测"])

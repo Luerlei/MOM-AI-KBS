@@ -2,7 +2,7 @@
 import json
 
 from app.database import SessionLocal
-from app.models import Category, Tag, Skill, ModelConfig
+from app.models import Category, Tag, Skill, ModelConfig, Dataset
 from app.services.skill_option_service import seed_options
 from app.utils.crypto import encrypt
 
@@ -102,6 +102,66 @@ INITIAL_FORECAST_MODELS = [
 ]
 
 
+# 预制示例时序数据集（用于趋势分析演示）
+# 数据格式: [{time, value, label}, ...]
+INITIAL_DATASETS = [
+    {
+        "name": "某车间月度产量（示例）",
+        "description": "2023-2024 年某车间月度产量数据，含上升趋势与季节波动，用于演示时序预测功能",
+        "frequency": "monthly",
+        "unit": "万件",
+        "source": "seed",
+        "series_data": [
+            {"time": "2023-01", "value": 110.2, "label": ""},
+            {"time": "2023-02", "value": 98.5, "label": "春节"},
+            {"time": "2023-03", "value": 125.4, "label": ""},
+            {"time": "2023-04", "value": 118.6, "label": ""},
+            {"time": "2023-05", "value": 130.1, "label": ""},
+            {"time": "2023-06", "value": 122.8, "label": ""},
+            {"time": "2023-07", "value": 135.3, "label": "旺季"},
+            {"time": "2023-08", "value": 138.9, "label": "旺季"},
+            {"time": "2023-09", "value": 128.7, "label": ""},
+            {"time": "2023-10", "value": 142.5, "label": ""},
+            {"time": "2023-11", "value": 145.2, "label": ""},
+            {"time": "2023-12", "value": 150.8, "label": "年终冲刺"},
+            {"time": "2024-01", "value": 115.6, "label": "春节"},
+            {"time": "2024-02", "value": 102.3, "label": "春节"},
+            {"time": "2024-03", "value": 132.1, "label": ""},
+            {"time": "2024-04", "value": 125.7, "label": ""},
+            {"time": "2024-05", "value": 138.4, "label": ""},
+            {"time": "2024-06", "value": 130.9, "label": ""},
+            {"time": "2024-07", "value": 143.2, "label": "旺季"},
+            {"time": "2024-08", "value": 147.6, "label": "旺季"},
+            {"time": "2024-09", "value": 136.8, "label": ""},
+            {"time": "2024-10", "value": 151.3, "label": ""},
+            {"time": "2024-11", "value": 154.7, "label": ""},
+            {"time": "2024-12", "value": 160.5, "label": "年终冲刺"},
+        ],
+    },
+    {
+        "name": "某设备季度故障次数（示例）",
+        "description": "2022-2024 年某关键设备季度故障次数，含周期性波动，用于演示时序预测功能",
+        "frequency": "quarterly",
+        "unit": "次",
+        "source": "seed",
+        "series_data": [
+            {"time": "2022-Q1", "value": 8, "label": ""},
+            {"time": "2022-Q2", "value": 12, "label": ""},
+            {"time": "2022-Q3", "value": 15, "label": "高温季"},
+            {"time": "2022-Q4", "value": 6, "label": ""},
+            {"time": "2023-Q1", "value": 9, "label": ""},
+            {"time": "2023-Q2", "value": 14, "label": ""},
+            {"time": "2023-Q3", "value": 18, "label": "高温季"},
+            {"time": "2023-Q4", "value": 7, "label": ""},
+            {"time": "2024-Q1", "value": 10, "label": ""},
+            {"time": "2024-Q2", "value": 13, "label": ""},
+            {"time": "2024-Q3", "value": 16, "label": "高温季"},
+            {"time": "2024-Q4", "value": 5, "label": "检修后"},
+        ],
+    },
+]
+
+
 def seed_initial_data():
     """系统启动时调用：创建预制数据（仅在不存在时创建）"""
     db = SessionLocal()
@@ -159,6 +219,22 @@ def seed_initial_data():
                     is_active=fdef["is_active"],
                 )
                 db.add(fc)
+        db.commit()
+
+        # 6. 创建预制示例时序数据集
+        for ddef in INITIAL_DATASETS:
+            existing = db.query(Dataset).filter(Dataset.name == ddef["name"]).first()
+            if not existing:
+                ds = Dataset(
+                    name=ddef["name"],
+                    description=ddef.get("description", ""),
+                    frequency=ddef.get("frequency", "other"),
+                    unit=ddef.get("unit", ""),
+                    series_data=json.dumps(ddef["series_data"], ensure_ascii=False),
+                    point_count=len(ddef["series_data"]),
+                    source=ddef.get("source", "seed"),
+                )
+                db.add(ds)
         db.commit()
     except Exception as e:
         # 初始化失败不应阻塞启动

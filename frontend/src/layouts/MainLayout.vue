@@ -128,7 +128,9 @@ import {
   ApiOutlined,
   BarChartOutlined,
   DashboardOutlined,
-  FileSearchOutlined
+  FileSearchOutlined,
+  LineChartOutlined,
+  DatabaseOutlined
 } from '@ant-design/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/app'
@@ -202,6 +204,23 @@ const menuItems = computed<ItemType[]>(() => [
     label: '模型配置'
   },
   {
+    key: '/trends-group',
+    icon: () => h(LineChartOutlined),
+    label: '时序分析',
+    children: [
+      {
+        key: '/datasets',
+        icon: () => h(DatabaseOutlined),
+        label: '数据集管理'
+      },
+      {
+        key: '/trends',
+        icon: () => h(LineChartOutlined),
+        label: '趋势分析'
+      }
+    ]
+  },
+  {
     key: '/token-stats',
     icon: () => h(BarChartOutlined),
     label: 'Token 统计'
@@ -245,6 +264,8 @@ watch(
       openKeys.value = ['/knowledge']
     } else if (path.startsWith('/qa')) {
       openKeys.value = ['/qa-group']
+    } else if (path.startsWith('/datasets') || path.startsWith('/trends')) {
+      openKeys.value = ['/trends-group']
     } else {
       openKeys.value = []
     }

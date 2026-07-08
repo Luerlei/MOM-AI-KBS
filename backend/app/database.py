@@ -24,7 +24,7 @@ def get_db():
 
 def init_db():
     """初始化数据库（建表）"""
-    from app.models import knowledge, category, tag, document, skill, model_config, qa_history, token_usage, search_history  # noqa: F401
+    from app.models import knowledge, category, tag, document, skill, model_config, qa_history, token_usage, search_history, dataset, forecast_task  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _auto_migrate()
 
@@ -38,6 +38,13 @@ def _auto_migrate():
     migrations = {
         "token_usage": [
             ("source", "VARCHAR(50) DEFAULT 'qa'"),
+        ],
+        "forecast_tasks": [
+            ("start_index", "INTEGER"),
+        ],
+        "forecast_results": [
+            ("actuals", "TEXT DEFAULT '[]'"),
+            ("metrics", "TEXT DEFAULT '{}'"),
         ],
     }
     try:

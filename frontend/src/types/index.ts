@@ -435,3 +435,186 @@ export interface UploadFileItem {
   response?: unknown
   originFileObj?: File
 }
+
+/**
+ * 数据频率
+ */
+export type DataFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly' | 'hourly' | 'other'
+
+/**
+ * 时序数据点
+ */
+export interface TimeSeriesPoint {
+  time: string
+  value: number
+  label?: string
+}
+
+/**
+ * 数据集
+ */
+export interface Dataset {
+  id: number
+  name: string
+  description: string
+  frequency: DataFrequency
+  unit: string
+  point_count: number
+  source: string
+  source_file: string
+  created_at: string
+  updated_at: string
+  series_data?: TimeSeriesPoint[]
+}
+
+/**
+ * 数据集查询参数
+ */
+export interface DatasetQuery {
+  keyword?: string
+  frequency?: DataFrequency
+  page?: number
+  page_size?: number
+}
+
+/**
+ * 数据集创建/更新请求
+ */
+export interface DatasetForm {
+  name: string
+  description?: string
+  frequency?: DataFrequency
+  unit?: string
+  series_data?: TimeSeriesPoint[]
+}
+
+/**
+ * 数据集预览统计
+ */
+export interface DatasetPreview {
+  dataset: Dataset
+  points: TimeSeriesPoint[]
+  stats: {
+    count: number
+    min: number
+    max: number
+    avg: number
+    first: number
+    last: number
+  }
+}
+
+/**
+ * 导入结果
+ */
+export interface ImportResult {
+  dataset: Dataset
+  warnings: string[]
+}
+
+/**
+ * 预测任务状态
+ */
+export type ForecastTaskStatus = 'pending' | 'running' | 'success' | 'failed'
+
+/**
+ * 预测任务
+ */
+export interface ForecastTask {
+  id: number
+  dataset_id: number
+  model_config_id: number | null
+  model_name: string
+  horizon: number
+  start_index: number | null
+  status: ForecastTaskStatus
+  error_message: string
+  duration_ms: number
+  created_at: string
+  completed_at: string
+}
+
+/**
+ * 预测结果
+ */
+export interface ForecastResult {
+  id: number
+  task_id: number
+  dataset_id: number
+  forecasts: number[]
+  quantiles: Record<string, number[]>
+  future_times: string[]
+  actuals: number[]
+  metrics: Record<string, number>
+  model_name: string
+  analysis: string
+  created_at: string
+}
+
+/**
+ * 预测执行请求
+ */
+export interface ForecastPredictRequest {
+  dataset_id: number
+  horizon: number
+  quantiles?: number[]
+  start_index?: number | null
+  skip_analysis?: boolean
+}
+
+/**
+ * 预测执行响应
+ */
+export interface ForecastPredictResponse {
+  task: ForecastTask
+  result: ForecastResult
+}
+
+/**
+ * 趋势统计数据
+ */
+export interface TrendStats {
+  count: number
+  min: number
+  max: number
+  avg: number
+  first: number
+  last: number
+  trend_direction: 'up' | 'down' | 'flat'
+  trend_strength: number
+  growth_rate: number
+  volatility: number
+}
+
+/**
+ * 趋势分析聚合数据
+ */
+export interface TrendAnalysis {
+  dataset: {
+    id: number
+    name: string
+    description: string
+    frequency: DataFrequency
+    unit: string
+    point_count: number
+  }
+  history: TimeSeriesPoint[]
+  forecast: {
+    forecasts: number[]
+    quantiles: Record<string, number[]>
+    future_times: string[]
+    actuals: number[]
+    metrics: Record<string, number>
+    model_name: string
+    duration_ms: number
+    analysis: string
+    task_id: number
+    start_index: number | null
+    horizon: number
+    is_backtest: boolean
+  } | null
+  analysis: {
+    stats: TrendStats
+    summary: string
+  }
+}
