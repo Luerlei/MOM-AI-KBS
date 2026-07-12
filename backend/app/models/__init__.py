@@ -11,9 +11,12 @@ from app.models.token_usage import TokenUsage
 from app.models.search_history import SearchHistory
 from app.models.dataset import Dataset
 from app.models.forecast_task import ForecastTask, ForecastResult
+from app.models.covariate import DatasetCovariate
+from app.models.knowledge_status_log import KnowledgeStatusLog
 
 __all__ = [
     "Category", "Tag", "Knowledge", "KnowledgeTag", "Document",
     "Skill", "SkillOption", "ModelConfig", "QAHistory", "TokenUsage", "SearchHistory",
-    "Dataset", "ForecastTask", "ForecastResult",
+    "Dataset", "ForecastTask", "ForecastResult", "DatasetCovariate",
+    "KnowledgeStatusLog",
 ]

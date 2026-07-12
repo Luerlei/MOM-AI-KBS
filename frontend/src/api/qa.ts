@@ -9,13 +9,14 @@ export async function askQuestionStream(
   question: string,
   options: {
     use_cache?: boolean
+    history?: { role: string; content: string }[]
     onMessage?: (chunk: string, fullText: string) => void
-    onDone?: (data: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string; degraded?: boolean }) => void
+    onDone?: (data: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string; degraded?: boolean; low_confidence?: boolean }) => void
     onError?: (error: Error) => void
     signal?: AbortSignal
   } = {}
 ): Promise<void> {
-  const { use_cache = true, onMessage, onDone, onError, signal } = options
+  const { use_cache = true, history, onMessage, onDone, onError, signal } = options
 
   try {
     const response = await fetch('/api/qa/ask', {
@@ -24,7 +25,7 @@ export async function askQuestionStream(
         'Content-Type': 'application/json',
         Accept: 'text/event-stream'
       },
-      body: JSON.stringify({ question, use_cache }),
+      body: JSON.stringify({ question, use_cache, history: history || [] }),
       signal
     })
 
@@ -40,7 +41,7 @@ export async function askQuestionStream(
     const decoder = new TextDecoder('utf-8')
     let buffer = ''
     let fullText = ''
-    const metaData: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string; degraded?: boolean } = {}
+    const metaData: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string; degraded?: boolean; low_confidence?: boolean } = {}
 
     while (true) {
       const { done, value } = await reader.read()
@@ -81,6 +82,7 @@ export async function askQuestionStream(
               }
               if (data.skill_name) metaData.skill_name = data.skill_name
               if (data.degraded !== undefined) metaData.degraded = data.degraded
+              if (data.low_confidence !== undefined) metaData.low_confidence = data.low_confidence
               if (data.content) {
                 fullText += data.content
                 onMessage?.(data.content, fullText)

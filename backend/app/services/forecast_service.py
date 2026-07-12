@@ -768,6 +768,9 @@ def _compute_metrics(actuals: list, forecasts: list,
             q = float(q_str)
             q_fc = q_forecasts[:n] if isinstance(q_forecasts, list) else []
             for i in range(min(n, len(q_fc))):
+                # F-1: 防御 actuals[i] 或 q_fc[i] 为 None
+                if actuals[i] is None or q_fc[i] is None:
+                    continue
                 diff = actuals[i] - q_fc[i]
                 loss = q * diff if diff >= 0 else (q - 1) * diff
                 total_loss += loss
@@ -780,9 +783,11 @@ def _compute_metrics(actuals: list, forecasts: list,
         p10 = quantiles["0.1"][:n] if isinstance(quantiles["0.1"], list) else []
         p90 = quantiles["0.9"][:n] if isinstance(quantiles["0.9"], list) else []
         if p10 and p90:
-            in_range = sum(1 for i in range(min(n, len(p10), len(p90)))
-                           if p10[i] <= actuals[i] <= p90[i])
-            coverage = in_range / min(n, len(p10), len(p90)) * 100
+            cov_n = min(n, len(p10), len(p90))
+            in_range = sum(1 for i in range(cov_n)
+                           if actuals[i] is not None and p10[i] is not None and p90[i] is not None
+                           and p10[i] <= actuals[i] <= p90[i])
+            coverage = in_range / cov_n * 100 if cov_n > 0 else 0.0
 
     result = {
         "mae": round(mae, 4),
@@ -814,7 +819,8 @@ async def _generate_llm_analysis(ds_name: str, frequency: str, unit: str,
                                   db: Session = None,
                                   labels: list = None,
                                   anomaly_indices: list = None,
-                                  decomposition: dict = None) -> str:
+                                  decomposition: dict = None,
+                                  covariate_names: list = None) -> str:
     """调用 LLM 生成自然语言趋势分析报告
 
     无 LLM 配置时回退到模板化摘要。
@@ -880,6 +886,15 @@ async def _generate_llm_analysis(ds_name: str, frequency: str, unit: str,
 - 季节性强度: {round(decomposition.get('seasonal_strength', 0), 2)}（0-1，越接近1季节性越强）
 """
 
+    # 协变量信息
+    covariate_section = ""
+    if covariate_names:
+        covariate_section = f"""
+## 协变量信息
+- 本次预测使用 {len(covariate_names)} 个协变量: {', '.join(covariate_names)}
+- 协变量类型说明: trend=线性趋势, is_holiday=节假日, is_weekend=周末, *_sin/*_cos=周期编码
+"""
+
     # 回测模式附加信息
     backtest_section = ""
     backtest_requirements = ""
@@ -935,7 +950,7 @@ async def _generate_llm_analysis(ds_name: str, frequency: str, unit: str,
 - 趋势方向: {stats.get('trend_direction', 'unknown')}（R²={stats.get('trend_strength', 0)}）
 - 平均环比增长率: {stats.get('growth_rate', 0)}%
 - 波动性（变异系数）: {stats.get('volatility', 0)}%
-{decomp_section}{anomaly_section}
+{decomp_section}{anomaly_section}{covariate_section}
 ## 预测结果（未来{len(forecasts)}步）
 {forecast_str}{interval_str}
 {backtest_section}
@@ -1109,11 +1124,18 @@ def _seasonal_naive_predict(train_values: list, horizon: int, season: int = 1) -
 
 
 def _simple_mae(actuals: list, forecasts: list) -> float:
-    """简单 MAE 计算"""
+    """简单 MAE 计算（F-2: 跳过 None 值对）"""
     n = min(len(actuals), len(forecasts))
     if n == 0:
         return 0.0
-    return sum(abs(actuals[i] - forecasts[i]) for i in range(n)) / n
+    total = 0.0
+    count = 0
+    for i in range(n):
+        if actuals[i] is None or forecasts[i] is None:
+            continue
+        total += abs(actuals[i] - forecasts[i])
+        count += 1
+    return total / count if count > 0 else 0.0
 
 
 # ==================== 交叉验证 ====================
@@ -1310,6 +1332,10 @@ async def compare_models(db: Session, dataset_id: int,
     full_values = [p["value"] for p in series]
     train_raw = full_values[:start_index]
     actual_values = full_values[start_index:start_index + actual_count]  # 原始值
+    # F-2: 过滤 actual_values 中的 None，防止 _simple_mae 计算 abs(None - x) 崩溃
+    # 同时保留原始索引映射，用于与 forecast 对齐
+    clean_actual_values = [v for v in actual_values if v is not None]
+    actual_count_clean = len(clean_actual_values)
 
     # 基线参考：仅在训练集上预处理（与 run_forecast 的回测模式一致）
     preprocess_info = _preprocess_series(train_raw, ds.frequency)
@@ -1318,9 +1344,10 @@ async def compare_models(db: Session, dataset_id: int,
     season = _get_seasonal_period(ds.frequency)
     naive_fc = _naive_predict(train_processed, actual_count)
     seasonal_naive_fc = _seasonal_naive_predict(train_processed, actual_count, season)
+    # 基线 MAE 用过滤 None 后的 actual_values 对齐截取
     baselines = {
-        "naive_mae": round(_simple_mae(actual_values, naive_fc), 4),
-        "seasonal_naive_mae": round(_simple_mae(actual_values, seasonal_naive_fc), 4),
+        "naive_mae": round(_simple_mae(clean_actual_values, naive_fc[:actual_count_clean]), 4),
+        "seasonal_naive_mae": round(_simple_mae(clean_actual_values, seasonal_naive_fc[:actual_count_clean]), 4),
         "naive_forecasts": naive_fc,
         "seasonal_naive_forecasts": seasonal_naive_fc,
     }
@@ -1387,6 +1414,50 @@ async def compare_models(db: Session, dataset_id: int,
         )
         db.commit()
         ModelManager.reload_forecast(db)
+
+    # 追加统计模型对比（ARIMA/ETS/Theta/Prophet）
+    stat_models = [
+        ("arima", "ARIMA"),
+        ("ets", "ETS"),
+        ("theta", "Theta"),
+        ("prophet", "Prophet"),
+    ]
+    train_times = [p.get("time", "") for p in series[:start_index]]
+    for stat_type, stat_label in stat_models:
+        stat_start = time.time()
+        try:
+            if stat_type == "ets":
+                stat_result = _ets_predict(train_processed, actual_count, ds.frequency)
+            elif stat_type == "arima":
+                stat_result = _arima_predict(train_processed, actual_count)
+            elif stat_type == "prophet":
+                stat_result = _prophet_predict(train_processed, actual_count, ds.frequency,
+                                               times=train_times)
+            else:
+                stat_result = _theta_predict(train_processed, actual_count)
+            stat_fc = stat_result["forecasts"][:len(actual_values)]
+            stat_metrics = _compute_metrics(
+                actual_values, stat_fc, train_processed,
+                stat_result.get("quantiles", {}), ds.frequency
+            )
+            model_results.append({
+                "model_name": stat_label,
+                "model_config_id": None,
+                "model_identifier": stat_result.get("model", stat_label),
+                "metrics": stat_metrics,
+                "duration_ms": int((time.time() - stat_start) * 1000),
+                "status": "success",
+            })
+        except Exception as e:
+            model_results.append({
+                "model_name": stat_label,
+                "model_config_id": None,
+                "model_identifier": stat_label,
+                "metrics": {},
+                "duration_ms": int((time.time() - stat_start) * 1000),
+                "status": "failed",
+                "error": str(e)[:200],
+            })
 
     # 找出最优模型（按 MAE 最低）
     best_model = None
@@ -1576,21 +1647,35 @@ def get_decomposition(db: Session, dataset_id: int) -> dict:
 
 # ==================== 统计模型预测（P3-2） ====================
 
-def _arima_predict(train_values: list, horizon: int, order=None) -> dict:
-    """ARIMA 模型预测"""
+def _arima_predict(train_values: list, horizon: int, order=None,
+                   exog_train=None, exog_future=None) -> dict:
+    """ARIMA 模型预测（支持协变量 exog）
+
+    Args:
+        exog_train: 训练集协变量矩阵 [n_train, n_features]（numpy array 或 None）
+        exog_future: 未来协变量矩阵 [horizon, n_features]（numpy array 或 None）
+    """
     try:
         from statsmodels.tsa.arima.model import ARIMA
         import numpy as np
 
+        has_exog = exog_train is not None
+        # 有 exog 时，预测必须提供 exog_future
+        if has_exog and exog_future is None:
+            raise APIError("使用协变量时必须提供 exog_future", status_code=400)
+
         if order is None:
-            # 自动选择阶数（简化版：基于 AIC 在小范围搜索）
+            # 自动选择阶数（有 exog 时缩小搜索范围以加速）
             best_aic = float("inf")
             best_order = (1, 1, 1)
-            for p in range(0, 3):
+            p_range = range(0, 2) if has_exog else range(0, 3)
+            q_range = range(0, 2) if has_exog else range(0, 3)
+            for p in p_range:
                 for d in range(0, 2):
-                    for q in range(0, 3):
+                    for q in q_range:
                         try:
-                            model = ARIMA(train_values, order=(p, d, q))
+                            model = ARIMA(train_values, order=(p, d, q),
+                                          exog=exog_train if has_exog else None)
                             res = model.fit()
                             if res.aic < best_aic:
                                 best_aic = res.aic
@@ -1599,27 +1684,37 @@ def _arima_predict(train_values: list, horizon: int, order=None) -> dict:
                             continue
             order = best_order
 
-        model = ARIMA(train_values, order=order)
+        model = ARIMA(train_values, order=order,
+                      exog=exog_train if has_exog else None)
         res = model.fit()
-        fc = res.forecast(steps=horizon)
+        fc = res.forecast(steps=horizon, exog=exog_future if has_exog else None)
         forecasts = [float(x) for x in np.array(fc)]
 
         # 置信区间
-        conf = res.get_forecast(steps=horizon).conf_int(alpha=0.2)
+        conf = res.get_forecast(steps=horizon,
+                                exog=exog_future if has_exog else None).conf_int(alpha=0.2)
         p10 = [float(x) for x in np.array(conf.iloc[:, 0])]
         p90 = [float(x) for x in np.array(conf.iloc[:, 1])]
 
+        model_label = f"ARIMA{order}" + ("+exog" if has_exog else "")
         return {
             "forecasts": forecasts,
             "quantiles": {"0.1": p10, "0.5": forecasts, "0.9": p90},
-            "model": f"ARIMA{order}",
+            "model": model_label,
+            "used_exog": has_exog,
         }
+    except APIError:
+        raise
     except Exception as e:
         raise APIError(f"ARIMA 预测失败: {str(e)[:150]}", status_code=500)
 
 
 def _ets_predict(train_values: list, horizon: int, frequency: str = "monthly") -> dict:
-    """ETS（指数平滑）模型预测"""
+    """ETS（指数平滑）模型预测
+
+    概率预测：优先使用 statsmodels 原生 simulate() 做 bootstrap 预测区间，
+    失败时回退到残差 std × sqrt(h) 缩放近似。
+    """
     try:
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
         import numpy as np
@@ -1627,7 +1722,6 @@ def _ets_predict(train_values: list, horizon: int, frequency: str = "monthly") -
 
         # 自动选择趋势和季节性
         trend_type = "add"
-        seasonal_type = None
         season_periods = None
 
         # 尝试带季节性，失败则退化为无季节
@@ -1647,11 +1741,31 @@ def _ets_predict(train_values: list, horizon: int, frequency: str = "monthly") -
         fc = res.forecast(horizon)
         forecasts = [float(x) for x in np.array(fc)]
 
-        # N18: 置信区间随 horizon 增长（预测误差按 sqrt(h) 缩放）
-        resid = res.resid
-        std = _math.sqrt(sum(r ** 2 for r in resid) / len(resid)) if len(resid) > 0 else 0
-        p10 = [f - 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
-        p90 = [f + 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
+        # 概率预测：使用 simulate 做 bootstrap 预测区间（更准确）
+        p10 = None
+        p90 = None
+        try:
+            # 生成 500 条模拟路径，取 10%/90% 分位数
+            sims = res.simulate(nsimulations=horizon, repetitions=500,
+                                random_state=42)
+            sims_arr = np.array(sims)  # shape: (horizon, 500) 或 (500, horizon)
+            if sims_arr.ndim == 2:
+                # 确保是 (horizon, repetitions)
+                if sims_arr.shape[0] != horizon:
+                    sims_arr = sims_arr.T
+                p10 = [float(np.percentile(sims_arr[i], 10)) for i in range(horizon)]
+                p90 = [float(np.percentile(sims_arr[i], 90)) for i in range(horizon)]
+        except Exception:
+            p10 = None
+            p90 = None
+
+        # 回退：残差 std × sqrt(h) 缩放近似
+        if p10 is None or p90 is None:
+            resid = res.resid
+            resid_clean = [r for r in resid if not _math.isnan(float(r))] if hasattr(resid, '__iter__') else []
+            std = _math.sqrt(sum(r ** 2 for r in resid_clean) / len(resid_clean)) if resid_clean else 0
+            p10 = [f - 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
+            p90 = [f + 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
 
         return {
             "forecasts": forecasts,
@@ -1706,7 +1820,7 @@ def _theta_predict(train_values: list, horizon: int) -> dict:
         # 3. 组合：标准 Theta 方法取平均
         forecasts = [0.5 * ses_forecast[i] + 0.5 * linear_forecast[i] for i in range(horizon)]
 
-        # 4. 置信区间：用残差标准差，随 horizon 增长（sqrt(h) 缩放）
+        # 4. 概率预测：残差 bootstrap（比 sqrt(h) 缩放更准确）
         linear_fitted = [intercept + slope * i for i in range(n)]
         # 处理 SES 第一个 fitted value 可能为 NaN
         if np.isnan(ses_fitted[0]):
@@ -1714,8 +1828,31 @@ def _theta_predict(train_values: list, horizon: int) -> dict:
         fitted = [0.5 * ses_fitted[i] + 0.5 * linear_fitted[i] for i in range(n)]
         resid = [float(train_values[i]) - fitted[i] for i in range(n)]
         std = _math.sqrt(sum(r ** 2 for r in resid) / n) if n > 0 else 0
-        p10 = [f - 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
-        p90 = [f + 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
+
+        # 残差 bootstrap：从残差中重采样，生成 500 条预测路径
+        p10 = None
+        p90 = None
+        try:
+            rng = np.random.default_rng(42)
+            n_boot = 500
+            boot_paths = np.zeros((n_boot, horizon))
+            resid_arr = np.array(resid)
+            for b in range(n_boot):
+                # 每条路径独立重采样残差，累加到预测上
+                sampled = rng.choice(resid_arr, size=horizon, replace=True)
+                # 残差累加（随机游走式累积，模拟预测误差增长）
+                cum = np.cumsum(sampled)
+                boot_paths[b] = np.array(forecasts) + cum
+            p10 = [float(np.percentile(boot_paths[:, i], 10)) for i in range(horizon)]
+            p90 = [float(np.percentile(boot_paths[:, i], 90)) for i in range(horizon)]
+        except Exception:
+            p10 = None
+            p90 = None
+
+        # 回退：sqrt(h) 缩放近似
+        if p10 is None or p90 is None:
+            p10 = [f - 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
+            p90 = [f + 1.28 * std * _math.sqrt(i + 1) for i, f in enumerate(forecasts)]
 
         return {
             "forecasts": forecasts,
@@ -1726,12 +1863,124 @@ def _theta_predict(train_values: list, horizon: int) -> dict:
         raise APIError(f"Theta 预测失败: {str(e)[:150]}", status_code=500)
 
 
+def _prophet_predict(train_values: list, horizon: int, frequency: str = "monthly",
+                     times: list = None,
+                     exog_train=None, exog_future=None,
+                     covariate_names: list = None) -> dict:
+    """Prophet 模型预测（自动趋势+季节+节假日分解，支持协变量 regressor）
+
+    Prophet 核心优势：
+    - 自动趋势分解（线性/分段线性）
+    - 自动季节性分解（年/周/日）
+    - 内置中国节假日效应
+    - 原生概率预测区间（基于不确定性模型）
+    - 支持外生回归量（add_regressor）
+
+    Args:
+        times: 训练数据的时间标签列表（用于构建 Prophet 的 ds 列）
+        exog_train: 训练集协变量矩阵 [n_train, n_features]（numpy array 或 None）
+        exog_future: 未来协变量矩阵 [horizon, n_features]（numpy array 或 None）
+        covariate_names: 协变量名称列表（用作 regressor 列名）
+    """
+    try:
+        from prophet import Prophet
+        import pandas as pd
+        import numpy as np
+
+        # 频率映射：数据集频率 → pandas 频率字符串
+        freq_map = {
+            "daily": "D",
+            "weekly": "W",
+            "monthly": "MS",
+            "quarterly": "QS",
+            "yearly": "YS",
+            "hourly": "H",
+        }
+        pandas_freq = freq_map.get(frequency, "MS")
+
+        # 构建训练 DataFrame
+        n = len(train_values)
+        ds_list = []
+        if times:
+            for t in times:
+                dt = _parse_date(t) if isinstance(t, str) else t
+                ds_list.append(dt if dt else pd.Timestamp("2000-01-01"))
+        else:
+            # 无时间标签时用序号生成日期
+            base = pd.Timestamp("2000-01-01")
+            ds_list = [base + pd.DateOffset(months=i) for i in range(n)]
+
+        df = pd.DataFrame({"ds": ds_list, "y": [float(v) for v in train_values]})
+
+        # 有协变量时添加 regressor
+        has_exog = exog_train is not None and covariate_names
+        if has_exog:
+            if exog_future is None:
+                raise APIError("使用协变量时必须提供 exog_future", status_code=400)
+            for i, name in enumerate(covariate_names):
+                col_name = f"reg_{name}"
+                df[col_name] = float(exog_train[:, i]) if exog_train.ndim > 1 else float(exog_train[i])
+
+        # 创建 Prophet 模型
+        # interval_width=0.8 对应 10%/90% 分位数
+        m = Prophet(
+            interval_width=0.8,
+            yearly_seasonality=True,
+            weekly_seasonality=(frequency in ("daily", "hourly")),
+            daily_seasonality=(frequency == "hourly"),
+            changepoint_prior_scale=0.05,
+        )
+
+        # 添加中国节假日
+        try:
+            m.add_country_holidays(country_name="CN")
+        except Exception:
+            pass  # 节假日数据加载失败时不影响预测
+
+        # 添加协变量 regressor
+        if has_exog:
+            for name in covariate_names:
+                m.add_regressor(f"reg_{name}")
+
+        # 拟合
+        m.fit(df)
+
+        # 构建未来 DataFrame
+        future = m.make_future_dataframe(periods=horizon, freq=pandas_freq, include_history=False)
+
+        # 填充未来协变量值
+        if has_exog:
+            for i, name in enumerate(covariate_names):
+                col_name = f"reg_{name}"
+                future[col_name] = float(exog_future[:, i]) if exog_future.ndim > 1 else float(exog_future[i])
+
+        # 预测
+        fc_df = m.predict(future)
+        forecasts = [float(x) for x in fc_df["yhat"].values]
+        p10 = [float(x) for x in fc_df["yhat_lower"].values]
+        p90 = [float(x) for x in fc_df["yhat_upper"].values]
+
+        model_label = "Prophet" + ("+regressor" if has_exog else "")
+        return {
+            "forecasts": forecasts,
+            "quantiles": {"0.1": p10, "0.5": forecasts, "0.9": p90},
+            "model": model_label,
+            "used_exog": has_exog,
+        }
+    except APIError:
+        raise
+    except Exception as e:
+        raise APIError(f"Prophet 预测失败: {str(e)[:150]}", status_code=500)
+
+
 def run_statistical_forecast(db: Session, dataset_id: int, horizon: int,
                              model_type: str = "arima",
-                             start_index: int = None) -> dict:
-    """执行统计模型预测（ARIMA/ETS/Theta）
+                             start_index: int = None,
+                             use_covariates: bool = False) -> dict:
+    """执行统计模型预测（ARIMA/ETS/Theta/Prophet）
 
-    不依赖外部推理服务，纯本地 statsmodels 计算。
+    不依赖外部推理服务，纯本地 statsmodels/prophet 计算。
+    ARIMA/Prophet 支持协变量 exog（use_covariates=True 时）。
     """
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
@@ -1765,21 +2014,44 @@ def run_statistical_forecast(db: Session, dataset_id: int, horizon: int,
         effective_horizon = horizon
 
     # 选择统计模型
-    model_map = {
-        "arima": _arima_predict,
-        "ets": _ets_predict,
-        "theta": _theta_predict,
-    }
-    if model_type not in model_map:
-        raise APIError(f"不支持的统计模型: {model_type}，可选: arima/ets/theta", status_code=400)
+    supported_models = ("arima", "ets", "theta", "prophet")
+    if model_type not in supported_models:
+        raise APIError(f"不支持的统计模型: {model_type}，可选: arima/ets/theta/prophet", status_code=400)
+
+    # 构建协变量矩阵（ARIMA 和 Prophet 支持 exog）
+    exog_train = None
+    exog_future = None
+    covariate_names = []
+    used_exog = False
+    if use_covariates and model_type in ("arima", "prophet"):
+        from app.services.covariate_service import build_exog_matrix
+        # 未来时间标签
+        if is_backtest:
+            future_t = actual_times
+        else:
+            future_t = _generate_future_times(times, effective_horizon, ds.frequency)
+        exog_train, exog_future, covariate_names = build_exog_matrix(
+            db, dataset_id, times, future_t
+        )
+        used_exog = exog_train is not None
 
     model_name = model_type.upper()
     start = time.time()
     try:
         if model_type == "ets":
             result = _ets_predict(values, effective_horizon, ds.frequency)
+        elif model_type == "arima":
+            result = _arima_predict(values, effective_horizon,
+                                    exog_train=exog_train, exog_future=exog_future)
+        elif model_type == "prophet":
+            result = _prophet_predict(values, effective_horizon, ds.frequency,
+                                      times=times,
+                                      exog_train=exog_train, exog_future=exog_future,
+                                      covariate_names=covariate_names if used_exog else None)
+            # Prophet 内部已设置 used_exog，同步到外层
+            used_exog = result.get("used_exog", used_exog)
         else:
-            result = model_map[model_type](values, effective_horizon)
+            result = _theta_predict(values, effective_horizon)
         duration_ms = int((time.time() - start) * 1000)
 
         # 生成未来时间标签
@@ -1798,12 +2070,17 @@ def run_statistical_forecast(db: Session, dataset_id: int, horizon: int,
                 actual_values, result["forecasts"][:len(actual_values)],
                 values, result.get("quantiles", {}), ds.frequency
             )
+        # 记录协变量使用信息
+        if used_exog:
+            metrics["used_covariates"] = True
+            metrics["covariate_names"] = covariate_names
 
         # 存任务和结果
+        model_label = result.get("model", model_name)
         task = ForecastTask(
             dataset_id=dataset_id,
             model_config_id=None,
-            model_name=model_name,
+            model_name=model_label,
             horizon=effective_horizon,
             start_index=start_index if is_backtest else None,
             status="success",
@@ -1814,6 +2091,11 @@ def run_statistical_forecast(db: Session, dataset_id: int, horizon: int,
         db.commit()
         db.refresh(task)
 
+        analysis_parts = [f"统计模型 {model_label} 预测完成。"]
+        analysis_parts.append(f"{preprocess_info['missing_filled']}个缺失值已填充，{preprocess_info['outliers_fixed']}个异常值已截断。")
+        if used_exog:
+            analysis_parts.append(f"使用 {len(covariate_names)} 个协变量: {', '.join(covariate_names)}。")
+
         fc_result = ForecastResult(
             task_id=task.id,
             dataset_id=dataset_id,
@@ -1822,8 +2104,8 @@ def run_statistical_forecast(db: Session, dataset_id: int, horizon: int,
             future_times=json.dumps(future_times, ensure_ascii=False),
             actuals=json.dumps(actual_values, ensure_ascii=False),
             metrics=json.dumps(metrics, ensure_ascii=False),
-            model_name=model_name,
-            analysis=f"统计模型 {model_name} 预测完成。{preprocess_info['missing_filled']}个缺失值已填充，{preprocess_info['outliers_fixed']}个异常值已截断。",
+            model_name=model_label,
+            analysis="".join(analysis_parts),
         )
         db.add(fc_result)
         db.commit()
@@ -1838,6 +2120,902 @@ def run_statistical_forecast(db: Session, dataset_id: int, horizon: int,
         if isinstance(e, APIError):
             raise
         raise APIError(f"统计模型预测失败: {e}", status_code=500)
+
+
+# ==================== 自动模型选择（B1） ====================
+
+async def auto_select_model(db: Session, dataset_id: int, horizon: int = 6,
+                            n_splits: int = 3, strategy: str = "expanding") -> dict:
+    """自动模型选择：对所有可用模型做交叉验证，推荐 MAE 最优模型
+
+    流程：
+    1. 对统计模型（ARIMA/ETS/Theta/Prophet）做快速 CV
+    2. 对已配置的基础 Forecast 模型做 CV（如有）
+    3. 按 CV 平均 MAE 排序，推荐最优模型
+    4. 返回排行榜 + 最优模型 + 推荐参数
+
+    Returns:
+        {
+            "ranking": [{model, avg_mae, avg_rmse, avg_mape, status}, ...],
+            "best_model": {model_name, model_type, avg_mae, recommendation},
+            "cv_details": [{split, model, mae, rmse}, ...],
+        }
+    """
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise APIError("数据集不存在", status_code=404)
+    series = _load_series(ds.series_data)
+    if len(series) < 6:
+        raise APIError(f"数据点数 {len(series)} 不足，自动选择至少需要 6 个点", status_code=400)
+
+    full_values = [p["value"] for p in series]
+    full_times = [p.get("time", "") for p in series]
+    n = len(full_values)
+
+    # 生成 CV 拆分点
+    actual_horizon = min(horizon, max(1, n // 4))
+    min_train = max(6, actual_horizon * 2)
+    if n - min_train < actual_horizon:
+        raise APIError("数据量不足以进行交叉验证", status_code=400)
+
+    # 等间距生成 n_splits 个拆分点
+    split_points = []
+    usable_start = min_train
+    usable_end = n - actual_horizon
+    if usable_end <= usable_start:
+        split_points = [usable_start]
+    else:
+        step = (usable_end - usable_start) / max(1, n_splits - 1)
+        for i in range(n_splits):
+            sp = int(usable_start + step * i)
+            if sp <= usable_end:
+                split_points.append(sp)
+
+    # 统计模型列表
+    stat_models = [
+        ("arima", "ARIMA"),
+        ("ets", "ETS"),
+        ("theta", "Theta"),
+        ("prophet", "Prophet"),
+    ]
+
+    # 基础 Forecast 模型列表（从DB读取）
+    from app.services.llm_client import ModelManager
+    base_models = (
+        db.query(ModelConfig)
+        .filter(ModelConfig.type == "Forecast", ModelConfig.is_active == True)  # noqa: E712
+        .all()
+    )
+
+    ranking = []
+    cv_details = []
+
+    # 评估统计模型
+    for stat_type, stat_label in stat_models:
+        mae_list = []
+        rmse_list = []
+        mape_list = []
+        success_count = 0
+        for sp in split_points:
+            try:
+                train_raw = full_values[:sp]
+                actual = full_values[sp:sp + actual_horizon]
+                if len(actual) < 1:
+                    continue
+                preprocess_info = _preprocess_series(train_raw, ds.frequency)
+                train_v = preprocess_info["values"]
+                train_t = full_times[:sp]
+
+                if stat_type == "ets":
+                    res = _ets_predict(train_v, len(actual), ds.frequency)
+                elif stat_type == "arima":
+                    res = _arima_predict(train_v, len(actual))
+                elif stat_type == "prophet":
+                    res = _prophet_predict(train_v, len(actual), ds.frequency, times=train_t)
+                else:
+                    res = _theta_predict(train_v, len(actual))
+
+                fc = res["forecasts"][:len(actual)]
+                m = _compute_metrics(actual, fc, train_v, res.get("quantiles", {}), ds.frequency)
+                mae_list.append(m.get("mae", 0))
+                rmse_list.append(m.get("rmse", 0))
+                mape_list.append(m.get("mape", 0))
+                success_count += 1
+                cv_details.append({
+                    "split": sp, "model": stat_label,
+                    "mae": round(m.get("mae", 0), 4),
+                    "rmse": round(m.get("rmse", 0), 4),
+                })
+            except Exception:
+                cv_details.append({
+                    "split": sp, "model": stat_label,
+                    "mae": None, "rmse": None, "error": "failed",
+                })
+
+        if mae_list:
+            avg_mae = round(sum(mae_list) / len(mae_list), 4)
+            avg_rmse = round(sum(rmse_list) / len(rmse_list), 4)
+            avg_mape = round(sum(mape_list) / len(mape_list), 4)
+            ranking.append({
+                "model": stat_label,
+                "model_type": stat_type,
+                "avg_mae": avg_mae,
+                "avg_rmse": avg_rmse,
+                "avg_mape": avg_mape,
+                "success_rate": f"{success_count}/{len(split_points)}",
+                "status": "success",
+            })
+        else:
+            ranking.append({
+                "model": stat_label,
+                "model_type": stat_type,
+                "avg_mae": None,
+                "avg_rmse": None,
+                "avg_mape": None,
+                "success_rate": f"0/{len(split_points)}",
+                "status": "failed",
+            })
+
+    # 评估基础 Forecast 模型（仅在已配置时）
+    for mc in base_models:
+        mae_list = []
+        rmse_list = []
+        mape_list = []
+        success_count = 0
+        for sp in split_points:
+            try:
+                result = await run_forecast(
+                    db, dataset_id=dataset_id, horizon=actual_horizon,
+                    start_index=sp, skip_analysis=True, is_internal=True,
+                )
+                m = result["result"].get("metrics", {})
+                if m.get("mae") is not None:
+                    mae_list.append(m["mae"])
+                    rmse_list.append(m.get("rmse", 0))
+                    mape_list.append(m.get("mape", 0))
+                    success_count += 1
+                    cv_details.append({
+                        "split": sp, "model": mc.name,
+                        "mae": round(m.get("mae", 0), 4),
+                        "rmse": round(m.get("rmse", 0), 4),
+                    })
+            except Exception:
+                cv_details.append({
+                    "split": sp, "model": mc.name,
+                    "mae": None, "rmse": None, "error": "failed",
+                })
+
+        if mae_list:
+            ranking.append({
+                "model": mc.name,
+                "model_type": "forecast",
+                "avg_mae": round(sum(mae_list) / len(mae_list), 4),
+                "avg_rmse": round(sum(rmse_list) / len(rmse_list), 4),
+                "avg_mape": round(sum(mape_list) / len(mape_list), 4),
+                "success_rate": f"{success_count}/{len(split_points)}",
+                "status": "success",
+            })
+
+    # 按 avg_mae 排序（失败的排最后）
+    ranking.sort(key=lambda x: x["avg_mae"] if x["avg_mae"] is not None else float("inf"))
+
+    # 推荐最优模型
+    best = None
+    successful = [r for r in ranking if r["status"] == "success" and r["avg_mae"] is not None]
+    if successful:
+        best = successful[0]
+        best_model = {
+            "model_name": best["model"],
+            "model_type": best["model_type"],
+            "avg_mae": best["avg_mae"],
+            "avg_rmse": best["avg_rmse"],
+            "recommendation": f"推荐使用 {best['model']}，CV平均MAE最低({best['avg_mae']})",
+        }
+    else:
+        best_model = {
+            "model_name": None,
+            "model_type": None,
+            "avg_mae": None,
+            "recommendation": "所有模型均评估失败，请检查数据或模型配置",
+        }
+
+    return {
+        "ranking": ranking,
+        "best_model": best_model,
+        "cv_details": cv_details,
+        "n_splits": len(split_points),
+        "horizon": actual_horizon,
+    }
+
+
+# ==================== 集成预测（B2） ====================
+
+async def ensemble_forecast(db: Session, dataset_id: int, horizon: int,
+                            start_index: int = None,
+                            models: list = None,
+                            strategy: str = "weighted_avg") -> dict:
+    """集成预测：组合多个模型的预测结果
+
+    Args:
+        models: 要集成的模型列表，如 ["arima", "ets", "theta", "prophet"]。
+                None 时默认使用全部统计模型。
+        strategy: 集成策略
+            - "weighted_avg": 加权平均（按回测MAE反比加权）
+            - "median": 中位数（稳健，抗异常值）
+            - "simple_avg": 简单平均
+
+    Returns:
+        {
+            "forecasts": [...], "quantiles": {...}, "model": "Ensemble(...)",
+            "member_results": [{model, forecasts, mae}, ...],
+            "weights": {model: weight, ...},
+        }
+    """
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise APIError("数据集不存在", status_code=404)
+    series = _load_series(ds.series_data)
+    if len(series) < 6:
+        raise APIError(f"数据点数 {len(series)} 不足，集成预测至少需要 6 个点", status_code=400)
+
+    full_values = [p["value"] for p in series]
+    full_times = [p.get("time", "") for p in series]
+
+    is_backtest = start_index is not None and start_index < len(full_values)
+    if is_backtest:
+        train_raw = full_values[:start_index]
+        preprocess_info = _preprocess_series(train_raw, ds.frequency)
+        values = preprocess_info["values"]
+        times = full_times[:start_index]
+        actual_count = min(horizon, len(full_values) - start_index)
+        actual_values = full_values[start_index:start_index + actual_count]
+        effective_horizon = actual_count
+    else:
+        preprocess_info = _preprocess_series(full_values, ds.frequency)
+        values = preprocess_info["values"]
+        times = full_times
+        actual_values = []
+        effective_horizon = horizon
+
+    # 默认集成全部统计模型
+    if models is None:
+        models = ["arima", "ets", "theta", "prophet"]
+
+    # 运行各成员模型
+    member_results = []
+    for model_type in models:
+        try:
+            if model_type == "ets":
+                res = _ets_predict(values, effective_horizon, ds.frequency)
+            elif model_type == "arima":
+                res = _arima_predict(values, effective_horizon)
+            elif model_type == "prophet":
+                res = _prophet_predict(values, effective_horizon, ds.frequency, times=times)
+            else:
+                res = _theta_predict(values, effective_horizon)
+
+            # 回测时计算成员MAE用于加权
+            member_mae = None
+            if is_backtest and actual_values:
+                fc_used = res["forecasts"][:len(actual_values)]
+                m = _compute_metrics(actual_values, fc_used, values, res.get("quantiles", {}), ds.frequency)
+                member_mae = m.get("mae", 0)
+
+            member_results.append({
+                "model": res.get("model", model_type.upper()),
+                "model_type": model_type,
+                "forecasts": res["forecasts"],
+                "quantiles": res.get("quantiles", {}),
+                "mae": member_mae,
+                "status": "success",
+            })
+        except Exception as e:
+            member_results.append({
+                "model": model_type.upper(),
+                "model_type": model_type,
+                "forecasts": [],
+                "quantiles": {},
+                "mae": None,
+                "status": "failed",
+                "error": str(e)[:150],
+            })
+
+    successful_members = [m for m in member_results if m["status"] == "success" and len(m["forecasts"]) > 0]
+    if not successful_members:
+        raise APIError("所有成员模型均预测失败，无法集成", status_code=500)
+
+    # 计算权重
+    weights = {}
+    if strategy == "weighted_avg":
+        # 按MAE反比加权（MAE越低权重越高）
+        if is_backtest and all(m["mae"] is not None for m in successful_members):
+            inv_maes = [1.0 / max(m["mae"], 1e-6) for m in successful_members]
+            total_inv = sum(inv_maes)
+            for m, inv in zip(successful_members, inv_maes):
+                weights[m["model"]] = round(inv / total_inv, 4)
+        else:
+            # 无MAE时退化为简单平均
+            w = 1.0 / len(successful_members)
+            for m in successful_members:
+                weights[m["model"]] = round(w, 4)
+    else:
+        # 简单平均 / 中位数
+        w = 1.0 / len(successful_members)
+        for m in successful_members:
+            weights[m["model"]] = round(w, 4)
+
+    # 集成预测
+    import numpy as np
+    fc_matrix = np.array([m["forecasts"] for m in successful_members])  # [n_models, horizon]
+
+    if strategy == "median":
+        ensemble_fc = np.median(fc_matrix, axis=0)
+    elif strategy == "simple_avg":
+        ensemble_fc = np.mean(fc_matrix, axis=0)
+    else:  # weighted_avg
+        w_arr = np.array([weights[m["model"]] for m in successful_members])
+        ensemble_fc = np.average(fc_matrix, axis=0, weights=w_arr)
+
+    ensemble_fc_list = [float(x) for x in ensemble_fc]
+
+    # 集成分位数（各成员的 p10/p90 加权平均）
+    p10_matrix = []
+    p90_matrix = []
+    for m in successful_members:
+        q = m["quantiles"]
+        if "0.1" in q and len(q["0.1"]) == effective_horizon:
+            p10_matrix.append(q["0.1"])
+        if "0.9" in q and len(q["0.9"]) == effective_horizon:
+            p90_matrix.append(q["0.9"])
+
+    if p10_matrix and len(p10_matrix) == len(successful_members):
+        p10_arr = np.array(p10_matrix)
+        p90_arr = np.array(p90_matrix)
+        if strategy == "median":
+            ens_p10 = np.median(p10_arr, axis=0)
+            ens_p90 = np.median(p90_arr, axis=0)
+        elif strategy == "simple_avg":
+            ens_p10 = np.mean(p10_arr, axis=0)
+            ens_p90 = np.mean(p90_arr, axis=0)
+        else:
+            ens_p10 = np.average(p10_arr, axis=0, weights=w_arr)
+            ens_p90 = np.average(p90_arr, axis=0, weights=w_arr)
+        ensemble_quantiles = {
+            "0.1": [float(x) for x in ens_p10],
+            "0.5": ensemble_fc_list,
+            "0.9": [float(x) for x in ens_p90],
+        }
+    else:
+        # 回退：用集成预测值 ± 成员标准差
+        std_arr = np.std(fc_matrix, axis=0)
+        ensemble_quantiles = {
+            "0.1": [float(max(0, ensemble_fc[i] - 1.28 * std_arr[i])) for i in range(effective_horizon)],
+            "0.5": ensemble_fc_list,
+            "0.9": [float(ensemble_fc[i] + 1.28 * std_arr[i]) for i in range(effective_horizon)],
+        }
+
+    # 未来时间标签
+    if is_backtest:
+        future_times = full_times[start_index:start_index + effective_horizon]
+    else:
+        future_times = _generate_future_times(times, effective_horizon, ds.frequency)
+
+    # 统计分析
+    stats = _compute_stats(values)
+
+    # 回测误差
+    metrics = {}
+    if is_backtest and actual_values:
+        metrics = _compute_metrics(
+            actual_values, ensemble_fc_list[:len(actual_values)],
+            values, ensemble_quantiles, ds.frequency
+        )
+    metrics["ensemble_strategy"] = strategy
+    metrics["ensemble_members"] = [m["model"] for m in successful_members]
+    metrics["ensemble_weights"] = weights
+
+    # 存任务和结果
+    model_label = f"Ensemble({strategy},{len(successful_members)}models)"
+    start = time.time()
+    task = ForecastTask(
+        dataset_id=dataset_id,
+        model_config_id=None,
+        model_name=model_label,
+        horizon=effective_horizon,
+        start_index=start_index if is_backtest else None,
+        status="success",
+        is_internal=0,
+        duration_ms=int((time.time() - start) * 1000),
+        completed_at=datetime.utcnow().isoformat(),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    fc_result = ForecastResult(
+        task_id=task.id,
+        dataset_id=dataset_id,
+        forecasts=json.dumps(ensemble_fc_list, ensure_ascii=False),
+        quantiles=json.dumps(ensemble_quantiles, ensure_ascii=False),
+        future_times=json.dumps(future_times, ensure_ascii=False),
+        actuals=json.dumps(actual_values, ensure_ascii=False),
+        metrics=json.dumps(metrics, ensure_ascii=False),
+        model_name=model_label,
+        analysis=f"集成预测：{len(successful_members)}个模型，策略={strategy}，成员={', '.join(m['model'] for m in successful_members)}",
+    )
+    db.add(fc_result)
+    db.commit()
+    db.refresh(fc_result)
+
+    return {
+        "task": _task_to_out(task),
+        "result": _result_to_out(fc_result),
+        "member_results": [{"model": m["model"], "mae": m["mae"], "status": m["status"]} for m in member_results],
+        "weights": weights,
+    }
+
+
+# ==================== 高级特征工程（B3） ====================
+
+def generate_advanced_features(values: list, frequency: str = "monthly",
+                               times: list = None) -> dict:
+    """生成高级时序特征
+
+    特征类型：
+    1. 滞后特征 (lag_1, lag_2, ...)
+    2. 滚动统计 (rolling_mean_3, rolling_std_3, ...)
+    3. 傅里叶项 (fourier_sin_*, fourier_cos_*) 用于周期编码
+    4. 差分特征 (diff_1, diff_2)
+    5. 动量特征 (momentum_3, momentum_6)
+
+    Returns:
+        {
+            "features": {feature_name: [values], ...},
+            "feature_names": [...],
+            "n_features": int,
+            "description": str,
+        }
+    """
+    import numpy as np
+    import math as _math
+
+    n = len(values)
+    if n < 3:
+        return {"features": {}, "feature_names": [], "n_features": 0, "description": "数据点不足"}
+
+    v = np.array(values, dtype=float)
+    features = {}
+
+    # 1. 滞后特征
+    for lag in [1, 2, 3]:
+        if n > lag:
+            col = np.full(n, np.nan)
+            col[lag:] = v[:-lag]
+            features[f"lag_{lag}"] = col
+
+    # 2. 滚动统计
+    for window in [3, 6]:
+        if n >= window:
+            roll_mean = np.full(n, np.nan)
+            roll_std = np.full(n, np.nan)
+            for i in range(window - 1, n):
+                chunk = v[i - window + 1: i + 1]
+                roll_mean[i] = np.mean(chunk)
+                roll_std[i] = np.std(chunk)
+            features[f"rolling_mean_{window}"] = roll_mean
+            features[f"rolling_std_{window}"] = roll_std
+
+    # 3. 傅里叶项（周期编码）
+    season_period = _get_seasonal_period(frequency)
+    if season_period and season_period > 1 and n >= season_period:
+        for k in range(1, min(3, season_period // 2 + 1)):
+            sin_col = np.sin(2 * np.pi * k * np.arange(n) / season_period)
+            cos_col = np.cos(2 * np.pi * k * np.arange(n) / season_period)
+            features[f"fourier_sin_{k}"] = sin_col
+            features[f"fourier_cos_{k}"] = cos_col
+
+    # 4. 差分特征
+    if n >= 2:
+        diff1 = np.full(n, np.nan)
+        diff1[1:] = np.diff(v)
+        features["diff_1"] = diff1
+    if n >= 3:
+        diff2 = np.full(n, np.nan)
+        diff2[2:] = np.diff(v, n=2)
+        features["diff_2"] = diff2
+
+    # 5. 动量特征（过去N期的变化率）
+    for mom_period in [3, 6]:
+        if n > mom_period:
+            momentum = np.full(n, np.nan)
+            for i in range(mom_period, n):
+                if v[i - mom_period] != 0:
+                    momentum[i] = (v[i] - v[i - mom_period]) / abs(v[i - mom_period])
+            features[f"momentum_{mom_period}"] = momentum
+
+    # 6. 时间索引特征（归一化）
+    features["time_index"] = np.arange(n, dtype=float) / max(1, n - 1)
+
+    # 填充 NaN 为 0
+    for key in features:
+        arr = features[key]
+        arr[np.isnan(arr)] = 0.0
+        features[key] = [float(x) for x in arr]
+
+    feature_names = list(features.keys())
+    desc_parts = [
+        f"滞后特征(lag_1/2/3)",
+        f"滚动统计(rolling_mean/std_3/6)",
+    ]
+    if season_period:
+        desc_parts.append(f"傅里叶项(period={season_period})")
+    desc_parts.append("差分特征(diff_1/2)")
+    desc_parts.append("动量特征(momentum_3/6)")
+
+    return {
+        "features": features,
+        "feature_names": feature_names,
+        "n_features": len(feature_names),
+        "description": "；".join(desc_parts),
+    }
+
+
+# ==================== 统计异常检测（B4） ====================
+
+def detect_anomalies(values: list, frequency: str = "monthly",
+                     method: str = "stl_residual",
+                     contamination: float = 0.05) -> dict:
+    """统计异常检测
+
+    支持三种方法：
+    1. stl_residual: STL分解残差 + 3σ规则
+    2. isolation_forest: 孤立森林（多维特征）
+    3. change_point: 变点检测（ruptures库）
+
+    Args:
+        method: "stl_residual" | "isolation_forest" | "change_point"
+        contamination: 异常比例阈值（仅 isolation_forest 使用）
+
+    Returns:
+        {
+            "method": str,
+            "anomaly_indices": [int, ...],
+            "anomaly_scores": [{index, score, value}, ...],
+            "change_points": [int, ...],  # 仅 change_point 方法
+            "summary": str,
+        }
+    """
+    import numpy as np
+    import math as _math
+
+    n = len(values)
+    if n < 6:
+        return {
+            "method": method,
+            "anomaly_indices": [],
+            "anomaly_scores": [],
+            "change_points": [],
+            "summary": "数据点不足，无法检测异常",
+        }
+
+    v = np.array(values, dtype=float)
+    anomaly_indices = []
+    anomaly_scores = []
+    change_points = []
+
+    if method == "isolation_forest":
+        try:
+            from sklearn.ensemble import IsolationForest
+            # 构建特征矩阵
+            feat_dict = generate_advanced_features(values, frequency)
+            feat_names = feat_dict["feature_names"]
+            if not feat_names:
+                # 特征不足，回退到 stl_residual
+                return detect_anomalies(values, frequency, "stl_residual", contamination)
+
+            X = np.array([feat_dict["features"][fn] for fn in feat_names]).T
+            iso = IsolationForest(contamination=contamination, random_state=42, n_estimators=100)
+            labels = iso.fit_predict(X)
+            scores = -iso.decision_function(X)  # 越大越异常
+
+            for i in range(n):
+                if labels[i] == -1:
+                    anomaly_indices.append(i)
+                    anomaly_scores.append({
+                        "index": i,
+                        "score": round(float(scores[i]), 4),
+                        "value": float(v[i]),
+                    })
+        except ImportError:
+            # sklearn 不可用时回退
+            return detect_anomalies(values, frequency, "stl_residual", contamination)
+
+    elif method == "change_point":
+        try:
+            import ruptures as rpt
+            # PELT 算法检测变点
+            algo = rpt.Pelt(model="rbf").fit(v.reshape(-1, 1))
+            # 自动选择惩罚系数
+            pen = _math.log(n) * np.std(v) * 0.5
+            bkps = algo.predict(pen=pen)
+            # bkps 包含末尾点 n，去掉
+            change_points = [b for b in bkps if b < n]
+            # 变点附近的点标记为异常
+            for cp in change_points:
+                if cp > 0:
+                    anomaly_indices.append(cp - 1)
+                    anomaly_scores.append({
+                        "index": cp - 1,
+                        "score": 1.0,
+                        "value": float(v[cp - 1]),
+                    })
+        except ImportError:
+            return {
+                "method": method,
+                "anomaly_indices": [],
+                "anomaly_scores": [],
+                "change_points": [],
+                "summary": "ruptures 库未安装，无法执行变点检测",
+            }
+
+    else:  # stl_residual（默认）
+        try:
+            from statsmodels.tsa.seasonal import STL
+            season_period = _get_seasonal_period(frequency)
+            period = season_period if season_period and season_period > 1 and n >= 2 * season_period else None
+
+            if period:
+                stl = STL(v, period=period, robust=True)
+            else:
+                # 无周期时用 STL 的默认
+                stl = STL(v, robust=True)
+            res = stl.fit()
+            resid = res.resid
+
+            # 3σ 规则
+            std = np.std(resid)
+            mean = np.mean(resid)
+            threshold = 3 * std if std > 0 else 0
+
+            for i in range(n):
+                if abs(resid[i] - mean) > threshold and threshold > 0:
+                    anomaly_indices.append(i)
+                    # 异常得分 = 残差 / std
+                    score = abs(resid[i] - mean) / std if std > 0 else 0
+                    anomaly_scores.append({
+                        "index": i,
+                        "score": round(float(score), 4),
+                        "value": float(v[i]),
+                    })
+        except Exception:
+            # STL 失败时用简单 3σ
+            std = np.std(v)
+            mean = np.mean(v)
+            threshold = 3 * std if std > 0 else 0
+            for i in range(n):
+                if abs(v[i] - mean) > threshold and threshold > 0:
+                    anomaly_indices.append(i)
+                    anomaly_scores.append({
+                        "index": i,
+                        "score": round(float(abs(v[i] - mean) / std), 4),
+                        "value": float(v[i]),
+                    })
+
+    summary = f"检测方法={method}，发现 {len(anomaly_indices)} 个异常点"
+    if change_points:
+        summary += f"，{len(change_points)} 个变点"
+
+    return {
+        "method": method,
+        "anomaly_indices": anomaly_indices,
+        "anomaly_scores": anomaly_scores,
+        "change_points": change_points,
+        "summary": summary,
+    }
+
+
+# ==================== 超参优化框架（B5） ====================
+
+def optimize_stat_model_params(db: Session, dataset_id: int,
+                               model_type: str = "ets",
+                               horizon: int = 6,
+                               n_trials: int = 20) -> dict:
+    """超参优化：网格搜索统计模型的最优参数
+
+    支持：
+    - ETS: trend(add/mul/None) × seasonal(add/mul/None)
+    - ARIMA: p(0-3) × d(0-2) × q(0-3)
+    - Theta: 无参数（标准实现），返回说明
+    - Prophet: changepoint_prior_scale(0.01-0.5) × seasonality_prior_scale(1-20)
+
+    Args:
+        n_trials: 最大尝试次数（ARIMA 网格可能超过此数）
+
+    Returns:
+        {
+            "model_type": str,
+            "best_params": {...},
+            "best_aic": float,
+            "best_mae": float,
+            "all_results": [{params, aic, mae, status}, ...],
+            "summary": str,
+        }
+    """
+    import numpy as np
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise APIError("数据集不存在", status_code=404)
+    series = _load_series(ds.series_data)
+    if len(series) < 6:
+        raise APIError(f"数据点数 {len(series)} 不足", status_code=400)
+
+    full_values = [p["value"] for p in series]
+    n = len(full_values)
+
+    # 留出尾部 horizon 个点做验证
+    actual_horizon = min(horizon, max(1, n // 4))
+    if n <= actual_horizon + 3:
+        actual_horizon = max(1, n // 5)
+
+    split = n - actual_horizon
+    train_raw = full_values[:split]
+    actual = full_values[split:]
+
+    preprocess_info = _preprocess_series(train_raw, ds.frequency)
+    train_v = preprocess_info["values"]
+
+    all_results = []
+    best_aic = float("inf")
+    best_mae = float("inf")
+    best_params = {}
+
+    if model_type == "ets":
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing
+        season_period = _get_seasonal_period(ds.frequency)
+        has_season = season_period and len(train_v) >= 2 * season_period
+
+        param_grid = []
+        for trend in ["add", "mul", None]:
+            for seasonal in ["add", "mul", None]:
+                if seasonal is not None and not has_season:
+                    continue
+                param_grid.append({"trend": trend, "seasonal": seasonal})
+
+        for params in param_grid[:n_trials]:
+            try:
+                kwargs = {"trend": params["trend"]}
+                if params["seasonal"] is not None and has_season:
+                    kwargs["seasonal"] = params["seasonal"]
+                    kwargs["seasonal_periods"] = season_period
+                model = ExponentialSmoothing(train_v, **kwargs)
+                res = model.fit()
+                fc = res.forecast(actual_horizon)
+                mae = _simple_mae(actual, list(fc[:len(actual)]))
+                aic = res.aic if hasattr(res, "aic") and res.aic is not None else float("inf")
+                all_results.append({
+                    "params": params, "aic": round(float(aic), 4),
+                    "mae": round(float(mae), 4), "status": "success",
+                })
+                if aic < best_aic:
+                    best_aic = aic
+                    best_mae = mae
+                    best_params = params
+            except Exception as e:
+                all_results.append({
+                    "params": params, "aic": None, "mae": None,
+                    "status": "failed", "error": str(e)[:100],
+                })
+
+    elif model_type == "arima":
+        from statsmodels.tsa.arima.model import ARIMA
+        count = 0
+        for p in range(0, 4):
+            for d in range(0, 3):
+                for q in range(0, 4):
+                    if count >= n_trials:
+                        break
+                    count += 1
+                    params = {"order": [p, d, q]}
+                    try:
+                        model = ARIMA(train_v, order=(p, d, q))
+                        res = model.fit()
+                        fc = res.forecast(actual_horizon)
+                        mae = _simple_mae(actual, list(fc[:len(actual)]))
+                        aic = res.aic
+                        all_results.append({
+                            "params": params, "aic": round(float(aic), 4),
+                            "mae": round(float(mae), 4), "status": "success",
+                        })
+                        if aic < best_aic:
+                            best_aic = aic
+                            best_mae = mae
+                            best_params = params
+                    except Exception as e:
+                        all_results.append({
+                            "params": params, "aic": None, "mae": None,
+                            "status": "failed", "error": str(e)[:100],
+                        })
+
+    elif model_type == "prophet":
+        from prophet import Prophet
+        import pandas as pd
+        train_times = [p.get("time", "") for p in series[:split]]
+        ds_list = []
+        for t in train_times:
+            dt = _parse_date(t) if isinstance(t, str) else t
+            ds_list.append(dt if dt else pd.Timestamp("2000-01-01"))
+        df = pd.DataFrame({"ds": ds_list, "y": [float(x) for x in train_v]})
+
+        param_grid = [
+            {"changepoint_prior_scale": 0.01, "seasonality_prior_scale": 1},
+            {"changepoint_prior_scale": 0.05, "seasonality_prior_scale": 5},
+            {"changepoint_prior_scale": 0.1, "seasonality_prior_scale": 10},
+            {"changepoint_prior_scale": 0.2, "seasonality_prior_scale": 10},
+            {"changepoint_prior_scale": 0.3, "seasonality_prior_scale": 15},
+            {"changepoint_prior_scale": 0.5, "seasonality_prior_scale": 20},
+        ]
+
+        for params in param_grid[:n_trials]:
+            try:
+                m = Prophet(
+                    interval_width=0.8,
+                    yearly_seasonality=True,
+                    changepoint_prior_scale=params["changepoint_prior_scale"],
+                    seasonality_prior_scale=params["seasonality_prior_scale"],
+                )
+                try:
+                    m.add_country_holidays(country_name="CN")
+                except Exception:
+                    pass
+                m.fit(df)
+                future = m.make_future_dataframe(periods=actual_horizon, include_history=False)
+                fc_df = m.predict(future)
+                fc = list(fc_df["yhat"].values)
+                mae = _simple_mae(actual, fc[:len(actual)])
+                # Prophet 无 AIC，用 MAE 作为选择标准
+                all_results.append({
+                    "params": params, "aic": None,
+                    "mae": round(float(mae), 4), "status": "success",
+                })
+                if mae < best_mae:
+                    best_mae = mae
+                    best_params = params
+            except Exception as e:
+                all_results.append({
+                    "params": params, "aic": None, "mae": None,
+                    "status": "failed", "error": str(e)[:100],
+                })
+        # Prophet 用 MAE 代替 AIC
+        best_aic = best_mae
+
+    elif model_type == "theta":
+        # Theta 是标准实现，无超参可调
+        return {
+            "model_type": "theta",
+            "best_params": {},
+            "best_aic": None,
+            "best_mae": None,
+            "all_results": [],
+            "summary": "Theta 方法为标准实现（SES θ=0 + 线性 θ=2 组合），无可调超参",
+        }
+
+    else:
+        raise APIError(f"不支持的超参优化模型: {model_type}，可选: ets/arima/prophet", status_code=400)
+
+    successful = [r for r in all_results if r["status"] == "success"]
+    summary = f"共尝试 {len(all_results)} 组参数，成功 {len(successful)} 组"
+    if best_params:
+        summary += f"，最优参数={best_params}，AIC/MAE={round(best_aic, 4)}"
+
+    return {
+        "model_type": model_type,
+        "best_params": best_params,
+        "best_aic": round(float(best_aic), 4) if best_aic != float("inf") else None,
+        "best_mae": round(float(best_mae), 4) if best_mae != float("inf") else None,
+        "all_results": all_results,
+        "summary": summary,
+    }
 
 
 # ==================== 导出增强（P3-4） ====================

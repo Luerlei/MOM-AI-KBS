@@ -64,6 +64,17 @@
             />
             <div class="toolbar-right">
               <a-space>
+                <a-select
+                  v-model:value="query.status"
+                  placeholder="全部状态"
+                  allow-clear
+                  style="width: 120px"
+                  @change="onStatusChange"
+                >
+                  <a-select-option value="published">已发布</a-select-option>
+                  <a-select-option value="draft">草稿</a-select-option>
+                  <a-select-option value="archived">已归档</a-select-option>
+                </a-select>
                 <a-button type="primary" @click="$router.push('/knowledge/edit')">
                   <PlusOutlined />新建
                 </a-button>
@@ -77,6 +88,16 @@
                   </span>
                   <a-button size="small" @click="openBatchTagModal">批量打标签</a-button>
                   <a-button size="small" @click="openBatchCategoryModal">移动分类</a-button>
+                  <a-dropdown>
+                    <a-button size="small">批量改状态</a-button>
+                    <template #overlay>
+                      <a-menu @click="batchSetStatus">
+                        <a-menu-item key="published">设为已发布</a-menu-item>
+                        <a-menu-item key="draft">设为草稿</a-menu-item>
+                        <a-menu-item key="archived">设为已归档</a-menu-item>
+                      </a-menu>
+                    </template>
+                  </a-dropdown>
                   <a-button size="small" danger @click="batchDelete">批量删除</a-button>
                 </template>
               </a-space>
@@ -90,7 +111,7 @@
             :loading="loading"
             :pagination="pagination"
             :row-selection="{ selectedRowKeys, onChange: onSelectChange }"
-            :scroll="{ x: 1100 }"
+            :scroll="{ x: 1200 }"
             row-key="id"
             size="middle"
             @change="onTableChange"
@@ -102,6 +123,11 @@
               <template v-else-if="column.key === 'content_type'">
                 <a-tag :color="contentTypeColor(record.content_type)">
                   {{ contentTypeText(record.content_type) }}
+                </a-tag>
+              </template>
+              <template v-else-if="column.key === 'status'">
+                <a-tag :color="statusColor(record.status)">
+                  {{ statusText(record.status) }}
                 </a-tag>
               </template>
               <template v-else-if="column.key === 'category_name'">
@@ -187,7 +213,7 @@ import {
   batchOperateKnowledge
 } from '@/api/knowledge'
 import { getCategoryTree, getTagList } from '@/api/category'
-import type { Knowledge, KnowledgeQuery, Category, Tag, PaginatedData } from '@/types'
+import type { Knowledge, KnowledgeQuery, Category, Tag, PaginatedData, KnowledgeStatus } from '@/types'
 
 const router = useRouter()
 const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
@@ -207,7 +233,8 @@ const query = ref<KnowledgeQuery>({
   page_size: 10,
   category_id: undefined,
   tag_ids: [],
-  keyword: ''
+  keyword: '',
+  status: undefined
 })
 
 const pagination = ref({
@@ -221,6 +248,7 @@ const pagination = ref({
 const columns = [
   { title: '标题', key: 'title', dataIndex: 'title', ellipsis: true, width: 200 },
   { title: '类型', key: 'content_type', dataIndex: 'content_type', width: 100 },
+  { title: '状态', key: 'status', dataIndex: 'status', width: 90 },
   { title: '分类', key: 'category_name', dataIndex: 'category_name', width: 120 },
   { title: '标签', key: 'tags', dataIndex: 'tags', width: 180 },
   { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 160 },
@@ -263,6 +291,12 @@ function resetFilters(): void {
   query.value.category_id = undefined
   query.value.tag_ids = []
   query.value.keyword = ''
+  query.value.status = undefined
+  query.value.page = 1
+  fetchData()
+}
+
+function onStatusChange(): void {
   query.value.page = 1
   fetchData()
 }
@@ -287,7 +321,8 @@ async function fetchData(): Promise<void> {
       page_size: query.value.page_size,
       category_id: query.value.category_id,
       tag_ids: query.value.tag_ids?.length ? query.value.tag_ids : undefined,
-      keyword: query.value.keyword || undefined
+      keyword: query.value.keyword || undefined,
+      status: query.value.status || undefined
     })
     tableData.value = res.items || []
     pagination.value.total = res.total || 0
@@ -416,6 +451,26 @@ function batchDelete(): void {
   })
 }
 
+async function batchSetStatus({ key }: { key: string }): Promise<void> {
+  const statusMap: Record<string, string> = {
+    published: '已发布',
+    draft: '草稿',
+    archived: '已归档'
+  }
+  try {
+    await batchOperateKnowledge({
+      ids: selectedRowKeys.value,
+      action: 'set_status',
+      status: key as KnowledgeStatus
+    })
+    message.success(`已批量设为「${statusMap[key] || key}」`)
+    selectedRowKeys.value = []
+    fetchData()
+  } catch {
+    // ignore
+  }
+}
+
 function contentTypeText(type: string): string {
   const map: Record<string, string> = {
     markdown: 'Markdown',
@@ -432,6 +487,24 @@ function contentTypeColor(type: string): string {
     html: 'orange'
   }
   return map[type] || 'default'
+}
+
+function statusText(status: string): string {
+  const map: Record<string, string> = {
+    published: '已发布',
+    draft: '草稿',
+    archived: '已归档'
+  }
+  return map[status || 'published'] || '已发布'
+}
+
+function statusColor(status: string): string {
+  const map: Record<string, string> = {
+    published: 'success',
+    draft: 'default',
+    archived: 'warning'
+  }
+  return map[status || 'published'] || 'success'
 }
 
 function formatTime(time: string): string {

@@ -1,8 +1,10 @@
 """RAG 检索增强服务（支持向量 + BM25 混合检索 + RRF 融合）"""
+import hashlib
 import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from typing import AsyncGenerator, Optional
 
 from app.services.vector_store import vector_store
@@ -10,8 +12,69 @@ from app.services.embedding_service import embedding_service
 from app.services.llm_client import model_manager
 from app.services.prompt_assembler import assemble as assemble_prompt
 from app.utils.response import APIError
+from app.config import QUERY_REWRITE_CACHE_TTL, QUERY_REWRITE_CACHE_MAXSIZE
 
 logger = logging.getLogger(__name__)
+
+
+class _RewriteCache:
+    """查询改写结果缓存（TTL + LRU 淘汰）
+
+    key = sha1(question + history_hash)
+    value = (rewritten_query, created_timestamp)
+    """
+
+    def __init__(self, ttl: int, maxsize: int):
+        self._ttl = ttl
+        self._maxsize = maxsize
+        self._store: OrderedDict = OrderedDict()
+        self._hits = 0
+        self._misses = 0
+
+    @staticmethod
+    def _make_key(question: str, history: list) -> str:
+        history_json = json.dumps(history or [], ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(f"{question}|{history_json}".encode("utf-8")).hexdigest()
+
+    def get(self, question: str, history: list) -> Optional[str]:
+        key = self._make_key(question, history)
+        item = self._store.get(key)
+        if item is None:
+            self._misses += 1
+            return None
+        rewritten, ts = item
+        if time.time() - ts > self._ttl:
+            # 过期
+            self._store.pop(key, None)
+            self._misses += 1
+            return None
+        # 命中：移到末尾（LRU）
+        self._store.move_to_end(key)
+        self._hits += 1
+        return rewritten
+
+    def set(self, question: str, history: list, rewritten: str):
+        key = self._make_key(question, history)
+        self._store[key] = (rewritten, time.time())
+        self._store.move_to_end(key)
+        # 超出容量时淘汰最老的
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
+
+    def stats(self) -> dict:
+        total = self._hits + self._misses
+        return {
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": round(self._hits / total, 4) if total > 0 else 0.0,
+            "size": len(self._store),
+            "maxsize": self._maxsize,
+            "ttl": self._ttl,
+        }
+
+
+# 全局查询改写缓存实例
+rewrite_cache = _RewriteCache(ttl=QUERY_REWRITE_CACHE_TTL, maxsize=QUERY_REWRITE_CACHE_MAXSIZE)
 
 # RRF 融合参数
 RRF_K = 60
@@ -54,16 +117,27 @@ def _tokenize_keywords(text: str) -> list:
 class RAGService:
     """RAG 检索增强生成服务"""
 
-    async def answer(self, question: str, skill, db, q_embedding: list = None) -> dict:
+    async def answer(self, question: str, skill, db, q_embedding: list = None, history: list = None) -> dict:
         """完整 RAG 流程
 
         Args:
             q_embedding: 预计算的查询向量（N8: 避免重复 Embedding 调用）。None 时内部计算。
+            history: 对话历史 [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
 
         Returns:
             dict: {answer, sources, token_input, token_output, duration_ms, degraded}
         """
         start = time.time()
+        # 0. 查询改写（可选）
+        search_query = question
+        rewrite_info = {}
+        if history and self._should_rewrite(skill):
+            try:
+                search_query, rewrite_info = await self._rewrite_query(question, history, skill)
+            except Exception:
+                logger.warning(f"[rag.answer] 查询改写失败，使用原始问题 skill_id={getattr(skill, 'id', '?')} question='{question[:80]}'", exc_info=True)
+                search_query = question
+
         # 1. 混合检索（向量 + BM25）
         results = []
         sources = []
@@ -71,17 +145,23 @@ class RAGService:
         degraded = False
         if q_vec is None:
             try:
-                q_vecs = await embedding_service.embed([question], source="qa")
+                q_vecs = await embedding_service.embed([search_query], source="qa")
                 if q_vecs:
                     q_vec = q_vecs[0]
             except APIError:
                 degraded = True  # 无 Embedding 模型，仅用 BM25，标记降级
             except Exception:
                 degraded = True
-                logger.exception(f"[rag.answer] Embedding 失败 question={question[:50]}")
+                logger.exception(f"[rag.answer] Embedding 失败 question={search_query[:50]}")
 
         # 混合检索（即使无 Embedding 也可走 BM25）
-        results = self._hybrid_search(q_vec, question, skill, db)
+        results = self._hybrid_search(q_vec, search_query, skill, db)
+
+        # 相似度阈值过滤：丢弃低于阈值的低质量结果
+        results, low_confidence = self._filter_by_relevance(results, degraded)
+
+        # Rerank 重排序（可选，配置了 Rerank 模型时启用）
+        results = await self._rerank_results(search_query, results)
 
         # 组装 sources
         for r in results:
@@ -93,8 +173,8 @@ class RAGService:
                 "score": r.get("score", 0.0),
             })
 
-        # 2. 组装 Prompt
-        messages = assemble_prompt(skill, question, results)
+        # 2. 组装 Prompt（K-1: 传入 history 支持多轮对话）
+        messages = assemble_prompt(skill, question, results, history=history)
 
         # 3. 调用 LLM 生成答案
         llm = model_manager.get_active_llm()
@@ -109,17 +189,28 @@ class RAGService:
             "duration_ms": duration_ms,
             "model": result.get("model", ""),
             "degraded": degraded,
+            "low_confidence": low_confidence,
         }
 
-    async def answer_stream(self, question: str, skill, db, q_embedding: list = None) -> AsyncGenerator[dict, None]:
+    async def answer_stream(self, question: str, skill, db, q_embedding: list = None, history: list = None) -> AsyncGenerator[dict, None]:
         """流式 RAG 流程
 
         Args:
             q_embedding: 预计算的查询向量（N8: 避免重复 Embedding 调用）。None 时内部计算。
+            history: 对话历史 [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
 
         yield: dict with type field
         """
         start = time.time()
+        # 0. 查询改写（可选）
+        search_query = question
+        if history and self._should_rewrite(skill):
+            try:
+                search_query, _ = await self._rewrite_query(question, history, skill)
+            except Exception:
+                logger.warning(f"[rag.answer_stream] 查询改写失败，使用原始问题 skill_id={getattr(skill, 'id', '?')} question='{question[:80]}'", exc_info=True)
+                search_query = question
+
         # 1. Embedding + 混合检索
         results = []
         sources = []
@@ -127,17 +218,23 @@ class RAGService:
         degraded = False
         if q_vec is None:
             try:
-                q_vecs = await embedding_service.embed([question], source="qa")
+                q_vecs = await embedding_service.embed([search_query], source="qa")
                 if q_vecs:
                     q_vec = q_vecs[0]
             except APIError:
                 degraded = True  # 无 Embedding 模型，仅用 BM25，标记降级
             except Exception:
                 degraded = True
-                logger.exception(f"[rag.answer_stream] Embedding 失败 question={question[:50]}")
+                logger.exception(f"[rag.answer_stream] Embedding 失败 question={search_query[:50]}")
 
         # 混合检索
-        results = self._hybrid_search(q_vec, question, skill, db)
+        results = self._hybrid_search(q_vec, search_query, skill, db)
+
+        # 相似度阈值过滤：丢弃低于阈值的低质量结果
+        results, low_confidence = self._filter_by_relevance(results, degraded)
+
+        # Rerank 重排序（可选，配置了 Rerank 模型时启用）
+        results = await self._rerank_results(search_query, results)
 
         # 组装 sources
         for r in results:
@@ -149,11 +246,11 @@ class RAGService:
                 "score": r.get("score", 0.0),
             })
 
-        # 先 yield 来源（附带降级标记）
-        yield {"type": "sources", "sources": sources, "degraded": degraded}
+        # 先 yield 来源（附带降级标记和低置信度标记）
+        yield {"type": "sources", "sources": sources, "degraded": degraded, "low_confidence": low_confidence}
 
-        # 2. 组装 Prompt
-        messages = assemble_prompt(skill, question, results)
+        # 2. 组装 Prompt（K-1: 传入 history 支持多轮对话）
+        messages = assemble_prompt(skill, question, results, history=history)
 
         # 3. 流式生成
         llm = model_manager.get_active_llm()
@@ -174,7 +271,147 @@ class RAGService:
             "model": usage.get("model", ""),
             "duration_ms": duration_ms,
             "degraded": degraded,
+            "low_confidence": low_confidence,
         }
+
+    async def _rerank_results(self, query: str, results: list) -> list:
+        """Rerank 重排序：配置了 Rerank 模型时对检索结果精排
+
+        策略：
+        - 未配置 Rerank 模型 → 直接返回原结果
+        - 已配置 → 调用 Rerank API 重新打分排序
+        - Rerank 失败 → 回退到原结果（不阻断流程）
+        """
+        if not results or len(results) <= 1:
+            return results
+
+        try:
+            reranker = model_manager.get_active_rerank()
+        except Exception:
+            return results
+
+        if not reranker:
+            return results  # 未配置 Rerank 模型，跳过
+
+        # 准备文档文本
+        documents = [r.get("document", "") or "" for r in results]
+        try:
+            ranked = await reranker.rerank(query, documents, top_n=len(results))
+            # 按 rerank 分数重新排序 results
+            reranked_results = []
+            for item in ranked:
+                idx = item.get("index", 0)
+                if 0 <= idx < len(results):
+                    r = results[idx].copy()
+                    r["score"] = item.get("relevance_score", r.get("score", 0.0))
+                    reranked_results.append(r)
+            logger.info(f"[rerank] 重排序完成: {len(reranked_results)} 条结果")
+            return reranked_results if reranked_results else results
+        except Exception:
+            logger.exception("[rerank] 重排序失败，回退到原结果")
+            return results
+
+    def _should_rewrite(self, skill) -> bool:
+        """判断是否启用查询改写"""
+        return getattr(skill, "enable_query_rewrite", False) is True
+
+    async def _rewrite_query(self, question: str, history: list, skill) -> tuple:
+        """用 LLM 改写查询，结合对话历史消解指代
+
+        Returns:
+            tuple: (改写后的查询, {original, rewritten, tokens, cache_hit})
+        """
+        from app.services.llm_client import model_manager as _mm
+
+        # 缓存命中检查：相同 question+history 直接返回缓存的改写结果
+        cached = rewrite_cache.get(question, history or [])
+        if cached is not None:
+            logger.info(f"[rewrite] 缓存命中 skill_id={getattr(skill, 'id', '?')} '{question[:50]}' → '{cached[:50]}'")
+            return cached, {
+                "original": question,
+                "rewritten": cached,
+                "tokens": 0,
+                "cache_hit": True,
+            }
+
+        # 构建历史摘要（最近几轮）
+        context_turns = getattr(skill, "context_turns", 3) or 3
+        recent = history[-(context_turns * 2):] if history else []
+        history_text = ""
+        for msg in recent:
+            role = "用户" if msg.get("role") == "user" else "助手"
+            content = (msg.get("content") or "")[:200]
+            history_text += f"{role}: {content}\n"
+
+        prompt = f"""请根据对话历史，将用户最新问题改写为一个独立、完整、可检索的查询。
+要求：
+1. 消解指代词（它、这个、那个等），补充具体指代对象
+2. 保留原意，不要添加新信息
+3. 只输出改写后的查询，不要任何解释
+
+对话历史：
+{history_text}
+
+用户最新问题：{question}
+
+改写后的查询："""
+
+        llm = _mm.get_active_llm()
+        result = await llm.chat([
+            {"role": "system", "content": "你是一个查询改写助手，擅长结合对话上下文改写搜索查询。"},
+            {"role": "user", "content": prompt},
+        ])
+        rewritten = (result.get("content", "") or "").strip().strip('"').strip("'")
+        # 如果改写结果为空或过长（异常），回退到原问题
+        if not rewritten:
+            logger.warning(f"[rewrite] 改写结果为空，回退到原问题 skill_id={getattr(skill, 'id', '?')} question='{question[:80]}'")
+            rewritten = question
+        elif len(rewritten) > len(question) * 5:
+            logger.warning(f"[rewrite] 改写结果异常过长({len(rewritten)}字符)，回退到原问题 skill_id={getattr(skill, 'id', '?')} question='{question[:80]}'")
+            rewritten = question
+        else:
+            logger.info(f"[rewrite] skill_id={getattr(skill, 'id', '?')} '{question[:50]}' → '{rewritten[:50]}'")
+            # 仅在改写结果有效时写入缓存（异常回退的不缓存）
+            rewrite_cache.set(question, history or [], rewritten)
+        return rewritten, {
+            "original": question,
+            "rewritten": rewritten,
+            "tokens": result.get("input_tokens", 0) + result.get("output_tokens", 0),
+            "cache_hit": False,
+        }
+
+    def _filter_by_relevance(self, results: list, degraded: bool) -> tuple:
+        """相似度阈值过滤：丢弃低于阈值的低质量结果
+
+        Args:
+            results: 检索结果列表
+            degraded: 是否为降级模式（无 Embedding，仅 BM25）
+
+        Returns:
+            tuple: (过滤后的结果列表, 是否低置信度)
+            - 低置信度 = 过滤后结果为空，或 top-1 分数低于阈值
+        """
+        from app.config import RAG_RELEVANCE_THRESHOLD
+
+        if not results:
+            return [], True
+
+        # 降级模式下 BM25 结果 score=0，不做阈值过滤，仅标记低置信度
+        if degraded:
+            return results, True
+
+        # 过滤低分结果
+        filtered = [r for r in results if r.get("score", 0.0) >= RAG_RELEVANCE_THRESHOLD]
+
+        # 如果过滤后为空，但原始有结果，保留 top-1（避免完全没有上下文）
+        if not filtered and results:
+            filtered = [results[0]]
+
+        # 低置信度判断：top-1 分数低于阈值
+        top_score = filtered[0].get("score", 0.0) if filtered else 0.0
+        low_confidence = top_score < RAG_RELEVANCE_THRESHOLD
+
+        return filtered, low_confidence
 
     def _parse_scope(self, skill) -> dict:
         """解析 skill.knowledge_scope"""
@@ -248,10 +485,11 @@ class RAGService:
             reverse=True
         )
 
-        # 4. 为 BM25 命中但向量未命中的 knowledge 补充 chunk
-        for kid in bm25_kids:
-            if kid not in kid_to_chunk:
-                chunks = vector_store.get_by_knowledge_id(kid, limit=1)
+        # 4. 为 BM25 命中但向量未命中的 knowledge 批量补充 chunk（K-5: 避免 N+1 查询）
+        missing_kids = [kid for kid in bm25_kids if kid not in kid_to_chunk]
+        if missing_kids:
+            batch_chunks = vector_store.get_batch_by_knowledge_ids(missing_kids, limit_per_kid=1)
+            for kid, chunks in batch_chunks.items():
                 if chunks:
                     kid_to_chunk[kid] = chunks[0]
 
@@ -305,6 +543,9 @@ class RAGService:
 
         q = db.query(Knowledge)
 
+        # 状态过滤：仅检索 published 状态的知识（draft/archived 不可见）
+        q = q.filter(Knowledge.status == "published")
+
         # Scope 过滤
         category_ids = scope.get("category_ids", [])
         tag_ids = scope.get("tag_ids", [])
@@ -316,8 +557,9 @@ class RAGService:
         # 关键词匹配
         conditions = []
         for kw in keywords:
-            conditions.append(Knowledge.title.like(f"%{kw}%"))
-            conditions.append(Knowledge.content.like(f"%{kw}%"))
+            esc_kw = kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(Knowledge.title.like(f"%{esc_kw}%", escape="\\"))
+            conditions.append(Knowledge.content.like(f"%{esc_kw}%", escape="\\"))
 
         if not conditions:
             return []

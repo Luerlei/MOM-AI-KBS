@@ -192,6 +192,70 @@
       />
     </a-card>
 
+    <!-- Rerank 重排序模型 -->
+    <a-card title="Rerank 重排序模型配置（可选）" style="margin-bottom: 16px">
+      <template #extra>
+        <a-button type="primary" @click="openCreateModal('Rerank')">
+          <PlusOutlined />新增 Rerank
+        </a-button>
+      </template>
+      <a-table
+        :columns="columns"
+        :data-source="rerankModels"
+        :loading="loading"
+        row-key="id"
+        :pagination="false"
+        size="middle"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <span class="model-name">{{ record.name }}</span>
+          </template>
+          <template v-else-if="column.key === 'model_name'">
+            <a-tag color="orange">{{ record.model_name }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'api_url'">
+            <span class="api-url">{{ record.api_url }}</span>
+          </template>
+          <template v-else-if="column.key === 'price'">
+            <span v-if="record.type === 'Forecast'" class="price-na">—</span>
+            <span v-else-if="!record.input_price && !record.output_price" class="price-na">未设置</span>
+            <span v-else class="price-cell">
+              <span>入{{ record.input_price }}</span>
+              <span>出{{ record.output_price }}</span>
+            </span>
+          </template>
+          <template v-else-if="column.key === 'is_active'">
+            <a-switch
+              :checked="record.is_active"
+              :loading="record._activating"
+              @change="onActivate(record)"
+            />
+          </template>
+          <template v-else-if="column.key === 'action'">
+            <a-space>
+              <a-button
+                type="link"
+                size="small"
+                :loading="record._testing"
+                @click="onTest(record)"
+              >
+                测试
+              </a-button>
+              <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
+              <a-popconfirm title="确定删除该模型配置?" @confirm="handleDelete(record.id)">
+                <a-button type="link" size="small" danger>删除</a-button>
+              </a-popconfirm>
+            </a-space>
+          </template>
+        </template>
+      </a-table>
+      <a-empty
+        v-if="!loading && rerankModels.length === 0"
+        description="未配置 Rerank 模型（可选，配置后 RAG 检索结果将精排）"
+      />
+    </a-card>
+
     <!-- 编辑/新增弹窗 -->
     <a-modal
       v-model:open="formVisible"
@@ -209,6 +273,7 @@
             <a-radio value="LLM">LLM 大语言模型</a-radio>
             <a-radio value="Embedding">Embedding 向量模型</a-radio>
             <a-radio value="Forecast">Forecast 时序预测模型</a-radio>
+            <a-radio value="Rerank">Rerank 重排序模型</a-radio>
           </a-radio-group>
         </a-form-item>
         <a-form-item label="API 地址" name="api_url">
@@ -216,7 +281,9 @@
             v-model:value="form.api_url"
             :placeholder="form.type === 'Forecast'
               ? '例如：http://localhost:8501（本地推理服务，暴露 /predict 端点）'
-              : '例如：https://api.openai.com/v1'"
+              : form.type === 'Rerank'
+                ? '例如：https://api.siliconflow.cn/v1（系统自动拼接 /rerank 端点）'
+                : '例如：https://api.openai.com/v1'"
           />
         </a-form-item>
         <a-form-item label="API Key" name="api_key">
@@ -232,7 +299,9 @@
             v-model:value="form.model_name"
             :placeholder="form.type === 'Forecast'
               ? '例如：amazon/chronos-bolt-base / google/timesfm-2.0-200m-pytorch'
-              : '例如：gpt-4 / qwen-plus'"
+              : form.type === 'Rerank'
+                ? '例如：BAAI/bge-reranker-v2-m3 / jina-reranker-v2-base-multilingual'
+                : '例如：gpt-4 / qwen-plus'"
           />
         </a-form-item>
         <a-form-item
@@ -319,6 +388,8 @@ const llmModels = computed(() => modelList.value.filter((m) => m.type === 'LLM')
 const embeddingModels = computed(() => modelList.value.filter((m) => m.type === 'Embedding'))
 
 const forecastModels = computed(() => modelList.value.filter((m) => m.type === 'Forecast'))
+
+const rerankModels = computed(() => modelList.value.filter((m) => m.type === 'Rerank'))
 
 // 表单
 const formRef = ref<FormInstance>()

@@ -59,6 +59,12 @@
           style="width: 120px"
           :options="statModelOptions"
         />
+        <a-tooltip
+          v-if="selectedStatModel === 'arima' || selectedStatModel === 'prophet'"
+          title="启用后 ARIMA/Prophet 会使用数据集的协变量（exog）增强预测。请在数据集管理页配置协变量。"
+        >
+          <a-checkbox v-model:checked="useCovariates">使用协变量</a-checkbox>
+        </a-tooltip>
         <a-button
           :loading="runningStatForecast"
           :disabled="!selectedDatasetId"
@@ -88,6 +94,45 @@
         >
           <template #icon><BarChartOutlined /></template>
           多模型对比
+        </a-button>
+        <a-divider type="vertical" />
+        <a-button
+          :loading="autoSelecting"
+          :disabled="!selectedDatasetId"
+          @click="onAutoSelect"
+        >
+          <template #icon><TrophyOutlined /></template>
+          自动选模型
+        </a-button>
+        <a-button
+          :loading="ensembling"
+          :disabled="!selectedDatasetId"
+          @click="onEnsembleForecast"
+        >
+          <template #icon><BlockOutlined /></template>
+          集成预测
+        </a-button>
+        <a-button
+          :disabled="!selectedDatasetId"
+          @click="featuresDrawerVisible = true"
+        >
+          <template #icon><FunctionOutlined /></template>
+          特征工程
+        </a-button>
+        <a-button
+          :disabled="!selectedDatasetId"
+          @click="anomalyDrawerVisible = true"
+        >
+          <template #icon><WarningOutlined /></template>
+          异常检测
+        </a-button>
+        <a-button
+          :loading="optimizing"
+          :disabled="!selectedDatasetId"
+          @click="onOptimizeParams"
+        >
+          <template #icon><TuningOutlined /></template>
+          超参优化
         </a-button>
         <a-tag v-if="switchingModel" color="processing">切换中...</a-tag>
       </a-space>
@@ -242,6 +287,14 @@
             </span>
             <span class="meta-item"><b>Naive基线MAE：</b>{{ fmtVal(baselineVal(metricsData, 'naive_mae')) }}{{ unitText }}</span>
             <span class="meta-item"><b>SeasonalNaive基线MAE：</b>{{ fmtVal(baselineVal(metricsData, 'seasonal_naive_mae')) }}{{ unitText }}</span>
+          </div>
+          <!-- 协变量信息 -->
+          <div v-if="hasCovariatesInfo" class="long-summary-meta" style="margin-top: 8px">
+            <span class="meta-item">
+              <b>协变量：</b>
+              <a-tag color="cyan" style="margin: 0">已启用 {{ covariateNames.length }} 个</a-tag>
+            </span>
+            <span class="meta-item"><b>协变量列表：</b>{{ covariateNames.join(', ') }}</span>
           </div>
           <a-divider v-if="summaryText" style="margin: 12px 0" />
           <div v-if="summaryText" class="long-summary-text">{{ summaryText }}</div>
@@ -527,6 +580,122 @@
         <a-empty v-else description="点击执行按钮开始多模型对比" :image="simpleImage" />
       </a-spin>
     </a-drawer>
+
+    <!-- B1: 自动模型选择抽屉 -->
+    <a-drawer
+      v-model:open="autoSelectDrawerVisible"
+      title="自动模型选择结果"
+      placement="right"
+      width="600"
+    >
+      <a-spin :spinning="autoSelecting">
+        <div v-if="autoSelectResult">
+          <a-alert
+            v-if="autoSelectResult.best_model?.recommendation"
+            :message="autoSelectResult.best_model.recommendation"
+            type="success"
+            show-icon
+            style="margin-bottom: 16px"
+          />
+          <a-descriptions :column="2" size="small" bordered style="margin-bottom: 16px">
+            <a-descriptions-item label="CV折数">{{ autoSelectResult.n_splits }}</a-descriptions-item>
+            <a-descriptions-item label="预测步长">{{ autoSelectResult.horizon }}</a-descriptions-item>
+          </a-descriptions>
+          <h4>模型排行榜</h4>
+          <a-table
+            :columns="[
+              { title: '排名', key: 'rank', width: 60 },
+              { title: '模型', dataIndex: 'model', key: 'model' },
+              { title: 'MAE', dataIndex: 'avg_mae', key: 'mae' },
+              { title: 'RMSE', dataIndex: 'avg_rmse', key: 'rmse' },
+              { title: 'MAPE', dataIndex: 'avg_mape', key: 'mape' },
+              { title: '成功率', dataIndex: 'success_rate', key: 'success_rate' },
+            ]"
+            :data-source="(autoSelectResult.ranking || []).map((r: any, i: number) => ({ ...r, rank: i + 1, key: i }))"
+            size="small"
+            :pagination="false"
+            style="margin-bottom: 16px"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'mae'">
+                <a-tag :color="record.rank === 1 ? 'green' : 'default'">{{ record.avg_mae ?? '-' }}</a-tag>
+              </template>
+            </template>
+          </a-table>
+        </div>
+        <a-empty v-else description="点击「自动选模型」按钮开始评估" :image="simpleImage" />
+      </a-spin>
+    </a-drawer>
+
+    <!-- B3: 特征工程抽屉 -->
+    <a-drawer
+      v-model:open="featuresDrawerVisible"
+      title="高级特征工程"
+      placement="right"
+      width="700"
+      @after-open="onFeaturesDrawerOpen"
+    >
+      <a-spin :spinning="featuresLoading">
+        <div v-if="featuresResult">
+          <a-alert :message="featuresResult.description" type="info" show-icon style="margin-bottom: 16px" />
+          <a-descriptions :column="2" size="small" bordered style="margin-bottom: 16px">
+            <a-descriptions-item label="特征数">{{ featuresResult.n_features }}</a-descriptions-item>
+            <a-descriptions-item label="特征列表">{{ featuresResult.feature_names?.join(', ') }}</a-descriptions-item>
+          </a-descriptions>
+          <h4>特征值预览（前10行）</h4>
+          <a-table
+            :columns="featuresPreviewColumns"
+            :data-source="featuresPreviewData"
+            size="small"
+            :pagination="false"
+            :scroll="{ x: 800 }"
+          />
+        </div>
+        <a-empty v-else description="加载数据中..." :image="simpleImage" />
+      </a-spin>
+    </a-drawer>
+
+    <!-- B4: 异常检测抽屉 -->
+    <a-drawer
+      v-model:open="anomalyDrawerVisible"
+      title="统计异常检测"
+      placement="right"
+      width="650"
+    >
+      <a-space direction="vertical" style="width: 100%; margin-bottom: 16px">
+        <a-radio-group v-model:value="anomalyMethod" button-style="solid">
+          <a-radio-button value="stl_residual">STL残差</a-radio-button>
+          <a-radio-button value="isolation_forest">孤立森林</a-radio-button>
+          <a-radio-button value="change_point">变点检测</a-radio-button>
+        </a-radio-group>
+        <a-button type="primary" :loading="anomalyLoading" @click="onDetectAnomalies">
+          执行检测
+        </a-button>
+      </a-space>
+      <a-spin :spinning="anomalyLoading">
+        <div v-if="anomalyResult">
+          <a-alert :message="anomalyResult.summary" type="warning" show-icon style="margin-bottom: 16px" />
+          <div v-if="anomalyResult.change_points?.length" style="margin-bottom: 12px">
+            <h4>变点位置</h4>
+            <a-tag v-for="cp in anomalyResult.change_points" :key="cp" color="orange">索引 {{ cp }}</a-tag>
+          </div>
+          <h4>异常点列表</h4>
+          <a-table
+            v-if="anomalyResult.anomaly_scores?.length"
+            :columns="[
+              { title: '索引', dataIndex: 'index', key: 'index', width: 80 },
+              { title: '异常得分', dataIndex: 'score', key: 'score' },
+              { title: '原始值', dataIndex: 'value', key: 'value' },
+            ]"
+            :data-source="anomalyResult.anomaly_scores.map((s: any, i: number) => ({ ...s, key: i }))"
+            size="small"
+            :pagination="{ pageSize: 10 }"
+          />
+          <a-empty v-else description="未检测到异常点" :image="simpleImage" />
+        </div>
+        <a-empty v-else description="选择检测方法后点击执行" :image="simpleImage" />
+      </a-spin>
+    </a-drawer>
   </div>
 </template>
 
@@ -542,6 +711,7 @@ import {
   FileTextOutlined, FieldTimeOutlined,
   VerticalAlignTopOutlined, VerticalAlignBottomOutlined, AimOutlined,
   ExperimentOutlined, BarChartOutlined,
+  TrophyOutlined, BlockOutlined, FunctionOutlined, WarningOutlined, TuningOutlined,
 } from '@ant-design/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/app'
@@ -558,6 +728,11 @@ import {
   compareModels,
   getDecomposition,
   runStatisticalForecast,
+  autoSelectModel,
+  ensembleForecast,
+  getAdvancedFeatures,
+  detectAnomalies,
+  optimizeParams,
 } from '@/api/forecast'
 import { getModelList, activateModel } from '@/api/model'
 import type {
@@ -607,9 +782,11 @@ const statModelOptions = [
   { label: 'ARIMA', value: 'arima' },
   { label: 'ETS', value: 'ets' },
   { label: 'Theta', value: 'theta' },
+  { label: 'Prophet', value: 'prophet' },
 ]
-const selectedStatModel = ref<'arima' | 'ets' | 'theta'>('arima')
+const selectedStatModel = ref<'arima' | 'ets' | 'theta' | 'prophet'>('arima')
 const runningStatForecast = ref(false)
+const useCovariates = ref(false)
 
 // 趋势数据
 const loadingTrend = ref(false)
@@ -718,6 +895,17 @@ const hasExtendedMetrics = computed(() => {
     (m.baselines && typeof m.baselines === 'object')
   )
 })
+
+// 协变量信息（统计模型 ARIMAX 时存在）
+const covariateNames = computed<string[]>(() => {
+  const m = metricsData.value as any
+  if (!m || typeof m !== 'object') return []
+  if (m.used_covariates && Array.isArray(m.covariate_names)) {
+    return m.covariate_names
+  }
+  return []
+})
+const hasCovariatesInfo = computed(() => covariateNames.value.length > 0)
 
 // ===== 交叉验证 =====
 const cvDrawerVisible = ref(false)
@@ -1386,6 +1574,7 @@ async function onRunStatForecast(): Promise<void> {
       horizon: horizon.value,
       model_type: selectedStatModel.value,
       start_index: predictMode.value === 'backtest' ? startIndex.value : null,
+      use_covariates: (selectedStatModel.value === 'arima' || selectedStatModel.value === 'prophet') && useCovariates.value,
     })
     // 用结果更新趋势数据中的预测信息（forecastInfo 为 computed，需更新 trendData）
     if (trendData.value) {
@@ -1432,6 +1621,184 @@ function statusText(s: string): string {
 function statusColor(s: string): string {
   const map: Record<string, string> = { pending: 'default', running: 'processing', success: 'green', failed: 'red' }
   return map[s] || 'default'
+}
+
+// ==================== B1: 自动模型选择 ====================
+const autoSelecting = ref(false)
+const autoSelectDrawerVisible = ref(false)
+const autoSelectResult = ref<any>(null)
+
+async function onAutoSelect() {
+  if (!selectedDatasetId.value) return
+  autoSelecting.value = true
+  autoSelectDrawerVisible.value = true
+  try {
+    const res = await autoSelectModel({
+      dataset_id: selectedDatasetId.value,
+      horizon: horizon.value,
+      n_splits: 3,
+    })
+    autoSelectResult.value = res
+    if (res?.best_model?.model_name) {
+      message.success(res.best_model.recommendation)
+    }
+  } catch {
+    // 错误已由拦截器提示
+  } finally {
+    autoSelecting.value = false
+  }
+}
+
+// ==================== B2: 集成预测 ====================
+const ensembling = ref(false)
+
+async function onEnsembleForecast() {
+  if (!selectedDatasetId.value) return
+  ensembling.value = true
+  try {
+    const res = await ensembleForecast({
+      dataset_id: selectedDatasetId.value,
+      horizon: horizon.value,
+      start_index: predictMode.value === 'backtest' ? startIndex.value : null,
+      strategy: 'weighted_avg',
+    })
+    if (res?.result && trendData.value) {
+      const t = res.task
+      const r = res.result
+      trendData.value.forecast = {
+        forecasts: r.forecasts,
+        quantiles: r.quantiles,
+        future_times: r.future_times,
+        actuals: r.actuals || [],
+        metrics: r.metrics || {},
+        model_name: r.model_name,
+        duration_ms: t.duration_ms,
+        analysis: r.analysis,
+        task_id: t.id,
+        start_index: t.start_index,
+        horizon: t.horizon,
+        is_backtest: t.start_index != null,
+      }
+      analysisText.value = r.analysis || ''
+      await nextTick()
+      renderChart()
+      const successCount = res.member_results?.filter((m: any) => m.status === 'success').length || 0
+      message.success(`集成预测完成：${successCount} 个模型参与`)
+    }
+  } catch {
+    // 错误已由拦截器提示
+  } finally {
+    ensembling.value = false
+  }
+}
+
+// ==================== B3: 高级特征工程 ====================
+const featuresDrawerVisible = ref(false)
+const featuresLoading = ref(false)
+const featuresResult = ref<any>(null)
+
+const featuresPreviewColumns = computed(() => {
+  if (!featuresResult.value?.feature_names) return []
+  return [
+    { title: '索引', key: 'idx', width: 60, customRender: ({ index }: any) => index },
+    ...featuresResult.value.feature_names.map((name: string) => ({
+      title: name,
+      dataIndex: name,
+      key: name,
+      width: 120,
+    })),
+  ]
+})
+
+const featuresPreviewData = computed(() => {
+  if (!featuresResult.value?.features) return []
+  const feats = featuresResult.value.features
+  const names = featuresResult.value.feature_names
+  const n = names.length > 0 ? feats[names[0]]?.length || 0 : 0
+  const rows: any[] = []
+  for (let i = 0; i < Math.min(10, n); i++) {
+    const row: any = { key: i }
+    for (const name of names) {
+      const val = feats[name]?.[i]
+      row[name] = val !== undefined ? Number(val).toFixed(4) : '-'
+    }
+    rows.push(row)
+  }
+  return rows
+})
+
+async function onFeaturesDrawerOpen() {
+  if (!selectedDatasetId.value || featuresResult.value) return
+  featuresLoading.value = true
+  try {
+    featuresResult.value = await getAdvancedFeatures(selectedDatasetId.value)
+  } catch {
+    // 错误已由拦截器提示
+  } finally {
+    featuresLoading.value = false
+  }
+}
+
+// ==================== B4: 异常检测 ====================
+const anomalyDrawerVisible = ref(false)
+const anomalyLoading = ref(false)
+const anomalyMethod = ref<'stl_residual' | 'isolation_forest' | 'change_point'>('stl_residual')
+const anomalyResult = ref<any>(null)
+
+async function onDetectAnomalies() {
+  if (!selectedDatasetId.value) return
+  anomalyLoading.value = true
+  try {
+    anomalyResult.value = await detectAnomalies({
+      dataset_id: selectedDatasetId.value,
+      method: anomalyMethod.value,
+    })
+    if (anomalyResult.value?.anomaly_indices?.length) {
+      message.success(`检测到 ${anomalyResult.value.anomaly_indices.length} 个异常点`)
+    } else {
+      message.info('未检测到异常点')
+    }
+  } catch {
+    // 错误已由拦截器提示
+  } finally {
+    anomalyLoading.value = false
+  }
+}
+
+// ==================== B5: 超参优化 ====================
+const optimizing = ref(false)
+
+async function onOptimizeParams() {
+  if (!selectedDatasetId.value) return
+  // 使用当前选中的统计模型，默认 arima
+  const modelType = selectedStatModel.value === 'prophet' ? 'prophet'
+    : selectedStatModel.value === 'ets' ? 'ets'
+    : selectedStatModel.value === 'theta' ? 'theta'
+    : 'arima'
+
+  if (modelType === 'theta') {
+    message.info('Theta 为标准实现，无可调超参')
+    return
+  }
+
+  optimizing.value = true
+  try {
+    const res = await optimizeParams({
+      dataset_id: selectedDatasetId.value,
+      model_type: modelType as any,
+      horizon: horizon.value,
+      n_trials: 20,
+    })
+    if (res?.best_params && Object.keys(res.best_params).length > 0) {
+      message.success(`最优参数: ${JSON.stringify(res.best_params)}，MAE=${res.best_mae}`)
+    } else {
+      message.info(res?.summary || '未找到有效参数')
+    }
+  } catch {
+    // 错误已由拦截器提示
+  } finally {
+    optimizing.value = false
+  }
 }
 
 // ===== 生命周期 =====

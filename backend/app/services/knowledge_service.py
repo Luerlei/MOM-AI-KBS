@@ -23,6 +23,28 @@ def _clear_answer_cache():
         logger.exception("[knowledge] 清除答案缓存失败")
 
 
+def _compute_file_hash(file_path: str, chunk_size: int = 8192) -> Optional[str]:
+    """计算文件内容的 SHA-256 哈希，用于去重检测"""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        logger.warning(f"[file_hash] 计算文件哈希失败: {file_path}")
+        return None
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 模式中的特殊字符（% _ \），防止被当通配符"""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _to_out(k: Knowledge, include_index_status: bool = False) -> dict:
     """转输出格式"""
     out = {
@@ -34,6 +56,7 @@ def _to_out(k: Knowledge, include_index_status: bool = False) -> dict:
         "category_name": k.category.name if k.category else None,
         "source_type": k.source_type,
         "source_file": k.source_file,
+        "status": k.status or "published",
         "tag_ids": [t.id for t in k.tags],
         "tag_names": [t.name for t in k.tags],
         "tags": [{"id": t.id, "name": t.name} for t in k.tags],
@@ -50,8 +73,61 @@ def _to_out(k: Knowledge, include_index_status: bool = False) -> dict:
     return out
 
 
+# 知识状态常量
+STATUS_DRAFT = "draft"
+STATUS_PUBLISHED = "published"
+STATUS_ARCHIVED = "archived"
+_VALID_STATUS = {STATUS_DRAFT, STATUS_PUBLISHED, STATUS_ARCHIVED}
+
+
+def _log_status_change(db, knowledge, old_status: str, new_status: str, operator: str = "system", reason: str = None):
+    """记录知识状态变更审计日志（失败不阻断主流程）"""
+    try:
+        from app.models import KnowledgeStatusLog
+        log = KnowledgeStatusLog(
+            knowledge_id=knowledge.id,
+            knowledge_title=knowledge.title,
+            old_status=old_status,
+            new_status=new_status,
+            operator=operator,
+            reason=reason,
+        )
+        db.add(log)
+        db.commit()
+    except Exception:
+        logger.exception(f"[status_log] 记录状态变更日志失败 knowledge_id={knowledge.id}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def get_status_logs(db, knowledge_id: int = None, page: int = 1, page_size: int = 20):
+    """查询知识状态变更审计日志"""
+    from app.models import KnowledgeStatusLog
+    q = db.query(KnowledgeStatusLog)
+    if knowledge_id:
+        q = q.filter(KnowledgeStatusLog.knowledge_id == knowledge_id)
+    total = q.count()
+    items = q.order_by(KnowledgeStatusLog.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return [
+        {
+            "id": log.id,
+            "knowledge_id": log.knowledge_id,
+            "knowledge_title": log.knowledge_title,
+            "old_status": log.old_status,
+            "new_status": log.new_status,
+            "operator": log.operator,
+            "reason": log.reason,
+            "created_at": log.created_at,
+        }
+        for log in items
+    ], total
+
+
 def get_list(db, page: int = 1, page_size: int = 10, category_id: Optional[int] = None,
-             tag_ids: Optional[list] = None, keyword: Optional[str] = None):
+             tag_ids: Optional[list] = None, keyword: Optional[str] = None,
+             status: Optional[str] = None):
     """分页查询，支持筛选"""
     q = db.query(Knowledge).options(joinedload(Knowledge.category), joinedload(Knowledge.tags))
     if category_id:
@@ -59,14 +135,23 @@ def get_list(db, page: int = 1, page_size: int = 10, category_id: Optional[int] 
     if tag_ids:
         q = q.join(knowledge_tags).join(Tag).filter(Tag.id.in_(tag_ids)).distinct()
     if keyword:
-        q = q.filter(Knowledge.title.like(f"%{keyword}%") | Knowledge.content.like(f"%{keyword}%"))
+        esc_kw = _escape_like(keyword)
+        q = q.filter(Knowledge.title.like(f"%{esc_kw}%", escape="\\") | Knowledge.content.like(f"%{esc_kw}%", escape="\\"))
+    if status and status in _VALID_STATUS:
+        q = q.filter(Knowledge.status == status)
     total = q.count()
     items = q.order_by(Knowledge.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return [_to_out(k) for k in items], total
 
 
 def get_by_id(db, id: int) -> Knowledge:
-    k = db.query(Knowledge).filter(Knowledge.id == id).first()
+    # K-4: 使用 joinedload 一次性加载 category + tags + documents，避免详情页 N+1 查询
+    k = (
+        db.query(Knowledge)
+        .options(joinedload(Knowledge.category), joinedload(Knowledge.tags), joinedload(Knowledge.documents))
+        .filter(Knowledge.id == id)
+        .first()
+    )
     if not k:
         raise APIError("知识条目不存在", status_code=404)
     return k
@@ -74,12 +159,15 @@ def get_by_id(db, id: int) -> Knowledge:
 
 async def create(db, data: KnowledgeCreate) -> Knowledge:
     """创建知识条目 + 同步向量索引"""
+    # 校验状态
+    status = data.status if data.status in _VALID_STATUS else STATUS_PUBLISHED
     k = Knowledge(
         title=data.title,
         content=data.content,
         content_type=data.content_type,
         category_id=data.category_id,
         source_type="manual",
+        status=status,
     )
     db.add(k)
     db.commit()
@@ -90,20 +178,22 @@ async def create(db, data: KnowledgeCreate) -> Knowledge:
         k.tags = tags
         db.commit()
         db.refresh(k)
-    # 同步向量索引
-    try:
-        await sync_vector_index(db, k.id)
-    except APIError:
-        # 未配置 Embedding 模型时跳过
-        pass
-    except Exception:
-        logger.exception(f"[create] 同步向量索引失败 knowledge_id={k.id}")
+    # 同步向量索引（仅 published 状态才索引）
+    if status == STATUS_PUBLISHED:
+        try:
+            await sync_vector_index(db, k.id)
+        except APIError:
+            # 未配置 Embedding 模型时跳过
+            pass
+        except Exception:
+            logger.exception(f"[create] 同步向量索引失败 knowledge_id={k.id}")
     return k
 
 
 async def update(db, id: int, data: KnowledgeUpdate) -> Knowledge:
     """更新知识条目 + 重建向量索引"""
     k = get_by_id(db, id)
+    old_status = k.status or STATUS_PUBLISHED
     if data.title is not None:
         k.title = data.title
     if data.content is not None:
@@ -115,24 +205,50 @@ async def update(db, id: int, data: KnowledgeUpdate) -> Knowledge:
     if data.tag_ids is not None:
         tags = db.query(Tag).filter(Tag.id.in_(data.tag_ids)).all()
         k.tags = tags
+    if data.status is not None and data.status in _VALID_STATUS:
+        k.status = data.status
     db.commit()
     db.refresh(k)
-    # 重建向量索引
-    try:
-        await sync_vector_index(db, k.id)
-    except APIError:
-        pass
-    except Exception:
-        logger.exception(f"[update] 同步向量索引失败 knowledge_id={k.id}")
+
+    new_status = k.status or STATUS_PUBLISHED
+    # 状态变更时记录审计日志
+    if old_status != new_status:
+        _log_status_change(db, k, old_status, new_status)
+    # 状态从 published 变为 draft/archived → 移除向量索引（检索不到）
+    if old_status == STATUS_PUBLISHED and new_status != STATUS_PUBLISHED:
+        remove_vector_index(k.id)
+        logger.info(f"[update] 状态 {old_status}→{new_status}，已移除向量索引 knowledge_id={k.id}")
+    # 状态变为 published（从 draft/archived 恢复）或内容更新 → 重建索引
+    elif new_status == STATUS_PUBLISHED:
+        try:
+            await sync_vector_index(db, k.id)
+        except APIError:
+            pass
+        except Exception:
+            logger.exception(f"[update] 同步向量索引失败 knowledge_id={k.id}")
     # 知识更新后清除答案缓存，防止返回过期内容
     _clear_answer_cache()
     return k
 
 
+def _cleanup_document_files(knowledge):
+    """清理知识条目关联的物理文件（防止孤儿文件堆积）"""
+    for doc in getattr(knowledge, "documents", []) or []:
+        try:
+            fp = doc.file_path
+            if fp and os.path.exists(fp):
+                os.remove(fp)
+                logger.info(f"[cleanup_files] 已删除物理文件: {fp}")
+        except OSError:
+            logger.warning(f"[cleanup_files] 删除物理文件失败: {getattr(doc, 'file_path', '')}")
+
+
 def delete(db, id: int):
-    """删除知识条目 + 移除向量索引"""
+    """删除知识条目 + 移除向量索引 + 清理物理文件"""
     k = get_by_id(db, id)
     remove_vector_index(k.id)
+    # 删除关联的物理文件（在 db.delete 前取 documents，避免级联删除后取不到）
+    _cleanup_document_files(k)
     db.delete(k)
     db.commit()
     # 知识删除后清除答案缓存，防止返回过期内容
@@ -155,67 +271,95 @@ async def upload_files(db, files: list, category_id: int = None, tag_ids: list =
     tag_id_set = set(tag_ids or [])
 
     created = []
+    skipped_duplicate = []
+    failed = []
     for upload_file in files:
         filename = upload_file.filename or "unknown.txt"
-        file_type = get_file_type(filename)
-        if not file_type:
-            continue
-        # 保存
-        file_path = save_upload_file(upload_file, filename)
-        # 解析
-        content = parse_file(file_path, file_type)
-        # 创建知识条目
-        k = Knowledge(
-            title=os.path.splitext(filename)[0],
-            content=content,
-            content_type="markdown",
-            source_type="upload",
-            source_file=filename,
-            category_id=category_id,
-        )
-        db.add(k)
-        db.commit()
-        db.refresh(k)
-        # 记录文档
-        doc = Document(
-            filename=filename,
-            file_path=file_path,
-            file_type=file_type,
-            file_size=os.path.getsize(file_path) if os.path.exists(file_path) else 0,
-            knowledge_id=k.id,
-        )
-        db.add(doc)
-        db.commit()
-        db.refresh(k)
-        # 预置标签
-        if tag_id_set:
-            for t in existing_tags:
-                if t.id in tag_id_set:
-                    k.tags.append(t)
+        try:
+            file_type = get_file_type(filename)
+            if not file_type:
+                logger.warning(f"[upload_files] 不支持的文件类型: {filename}")
+                failed.append({"filename": filename, "reason": "不支持的文件类型"})
+                continue
+            # 保存
+            file_path = save_upload_file(upload_file, filename)
+            # 计算文件 hash 用于去重检测
+            file_hash = _compute_file_hash(file_path)
+            if file_hash:
+                existing_doc = db.query(Document).filter(Document.file_hash == file_hash).first()
+                if existing_doc:
+                    # 重复文件：删除刚保存的临时文件，跳过
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+                    logger.info(f"[upload_files] 跳过重复文件: {filename}（hash={file_hash[:16]}...）")
+                    skipped_duplicate.append(filename)
+                    continue
+            # 解析
+            content = parse_file(file_path, file_type)
+            # 创建知识条目
+            k = Knowledge(
+                title=os.path.splitext(filename)[0],
+                content=content,
+                content_type="markdown",
+                source_type="upload",
+                source_file=filename,
+                category_id=category_id,
+            )
+            db.add(k)
             db.commit()
             db.refresh(k)
-        # 自动打标签
-        if auto_tag:
+            # 记录文档
+            doc = Document(
+                filename=filename,
+                file_path=file_path,
+                file_type=file_type,
+                file_size=os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+                file_hash=file_hash,
+                knowledge_id=k.id,
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(k)
+            # 预置标签
+            if tag_id_set:
+                for t in existing_tags:
+                    if t.id in tag_id_set:
+                        k.tags.append(t)
+                db.commit()
+                db.refresh(k)
+            # 自动打标签
+            if auto_tag:
+                try:
+                    assigned = await _auto_tag_knowledge(db, k, content, existing_tags)
+                    if assigned:
+                        db.refresh(k)
+                        # 更新本地缓存
+                        for t in assigned:
+                            if t not in existing_tags:
+                                existing_tags.append(t)
+                        logger.info(f"[upload_files] auto_tag knowledge_id={k.id} tags={[t.name for t in assigned]}")
+                except Exception:
+                    logger.exception(f"[upload_files] auto_tag 失败 knowledge_id={k.id}")
+            # 同步向量索引
             try:
-                assigned = await _auto_tag_knowledge(db, k, content, existing_tags)
-                if assigned:
-                    db.refresh(k)
-                    # 更新本地缓存
-                    for t in assigned:
-                        if t not in existing_tags:
-                            existing_tags.append(t)
-                    logger.info(f"[upload_files] auto_tag knowledge_id={k.id} tags={[t.name for t in assigned]}")
+                await sync_vector_index(db, k.id)
+            except APIError:
+                pass
             except Exception:
-                logger.exception(f"[upload_files] auto_tag 失败 knowledge_id={k.id}")
-        # 同步向量索引
-        try:
-            await sync_vector_index(db, k.id)
-        except APIError:
-            pass
+                logger.exception(f"[upload_files] 同步向量索引失败 knowledge_id={k.id}")
+            created.append(k)
         except Exception:
-            logger.exception(f"[upload_files] 同步向量索引失败 knowledge_id={k.id}")
-        created.append(k)
-    return created
+            # K-6: 单文件失败不中断整批上传，记录错误并继续处理后续文件
+            db.rollback()
+            logger.exception(f"[upload_files] 文件处理失败: {filename}")
+            failed.append({"filename": filename, "reason": "处理异常，详见日志"})
+    if skipped_duplicate:
+        logger.info(f"[upload_files] 跳过 {len(skipped_duplicate)} 个重复文件: {skipped_duplicate}")
+    if failed:
+        logger.warning(f"[upload_files] {len(failed)} 个文件处理失败: {[f['filename'] for f in failed]}")
+    return {"created": created, "skipped_duplicate": skipped_duplicate, "failed": failed}
 
 
 async def _auto_tag_knowledge(db, knowledge, content: str, existing_tags: list):
@@ -304,15 +448,25 @@ async def _auto_tag_knowledge(db, knowledge, content: str, existing_tags: list):
 
 
 def batch_operation(db, data: BatchOperation):
-    """批量操作：delete / add_tag(s) / move_category / set_category"""
+    """批量操作：delete / add_tag(s) / move_category / set_category / set_status"""
     if not data.ids:
         raise APIError("请选择要操作的条目")
     if data.action == "delete":
-        for kid in data.ids:
+        # 先查询要删除的知识条目（含 documents），用于清理物理文件
+        items_to_delete = (
+            db.query(Knowledge)
+            .options(joinedload(Knowledge.documents))
+            .filter(Knowledge.id.in_(data.ids))
+            .all()
+        )
+        for k in items_to_delete:
             try:
-                remove_vector_index(kid)
+                remove_vector_index(k.id)
             except Exception:
-                logger.exception(f"[batch_operation] 移除向量索引失败 knowledge_id={kid}")
+                logger.exception(f"[batch_operation] 移除向量索引失败 knowledge_id={k.id}")
+            _cleanup_document_files(k)
+        # K-2: 显式删除关联 Document 记录，避免 bulk delete 绕过 ORM 级联产生孤儿记录
+        db.query(Document).filter(Document.knowledge_id.in_(data.ids)).delete(synchronize_session=False)
         db.query(Knowledge).filter(Knowledge.id.in_(data.ids)).delete(synchronize_session=False)
         db.commit()
         # 批量删除后清除答案缓存
@@ -333,14 +487,39 @@ def batch_operation(db, data: BatchOperation):
         for k in items:
             k.category_id = data.category_id
         db.commit()
+    elif data.action == "set_status":
+        if not data.status or data.status not in _VALID_STATUS:
+            raise APIError("状态值无效，应为 draft/published/archived")
+        items = db.query(Knowledge).filter(Knowledge.id.in_(data.ids)).all()
+        for k in items:
+            old = k.status or STATUS_PUBLISHED
+            k.status = data.status
+            # 状态变更时记录审计日志
+            if old != data.status:
+                _log_status_change(db, k, old, data.status)
+            # published → draft/archived：移除向量索引
+            if old == STATUS_PUBLISHED and data.status != STATUS_PUBLISHED:
+                try:
+                    remove_vector_index(k.id)
+                except Exception:
+                    logger.exception(f"[batch_operation] 移除向量索引失败 knowledge_id={k.id}")
+        db.commit()
+        # 状态变更后清除答案缓存
+        _clear_answer_cache()
     else:
         raise APIError(f"不支持的操作类型: {data.action}")
 
 
 def get_related(db, knowledge_id: int, limit: int = 5):
-    """获取相关内容（同分类或同标签）"""
+    """获取相关内容（同分类或同标签，仅 published 状态）"""
     k = get_by_id(db, knowledge_id)
-    q = db.query(Knowledge).filter(Knowledge.id != knowledge_id)
+    # K-3: 使用 joinedload 避免 _to_out 访问 category/tags 时的 N+1 懒加载
+    q = (
+        db.query(Knowledge)
+        .options(joinedload(Knowledge.category), joinedload(Knowledge.tags))
+        .filter(Knowledge.id != knowledge_id)
+        .filter(Knowledge.status == STATUS_PUBLISHED)
+    )
     same_cat = []
     same_tag = []
     if k.category_id:
@@ -364,11 +543,16 @@ async def sync_vector_index(db, knowledge_id: int) -> bool:
     """同步向量索引：分块 -> Embedding -> ChromaDB.add
 
     返回 True 表示索引成功，False 表示失败或跳过。
+    仅对 status=published 的知识建立索引，draft/archived 不索引。
     """
     k = db.query(Knowledge).filter(Knowledge.id == knowledge_id).first()
     if not k:
         return False
     if not k.content or not k.content.strip():
+        return False
+    # 状态守卫：非 published 状态不建索引
+    if (k.status or STATUS_PUBLISHED) != STATUS_PUBLISHED:
+        logger.info(f"[sync_vector_index] 跳过非发布状态知识 knowledge_id={knowledge_id} status={k.status}")
         return False
     # 先移除旧的
     remove_vector_index(knowledge_id)
@@ -385,6 +569,22 @@ async def sync_vector_index(db, knowledge_id: int) -> bool:
         return False
     if not embeddings or len(embeddings) != len(chunks):
         return False
+    # 获取 embedding 模型元信息（用于 chunk 视图调试）
+    from app.services.llm_client import model_manager as _mm
+    embedding_model_name = ""
+    embedding_dim = 0
+    try:
+        emb_client = _mm.get_active_embedding()
+        if emb_client:
+            embedding_model_name = getattr(emb_client, "model_name", "") or getattr(emb_client, "config", None)
+            if hasattr(emb_client, "config") and emb_client.config:
+                embedding_model_name = getattr(emb_client.config, "model_name", "") or ""
+    except Exception:
+        pass
+    if embeddings:
+        embedding_dim = len(embeddings[0]) if embeddings[0] else 0
+    from datetime import datetime as _dt
+    _now = _dt.utcnow().isoformat()
     # metadata
     metadata = []
     for i, c in enumerate(chunks):
@@ -393,6 +593,9 @@ async def sync_vector_index(db, knowledge_id: int) -> bool:
             "title": k.title,
             "category_id": str(k.category_id) if k.category_id else "",
             "chunk_index": i,
+            "embedding_model": embedding_model_name,
+            "embedding_dim": embedding_dim,
+            "indexed_at": _now,
         })
     try:
         vector_store.add(
@@ -418,6 +621,8 @@ def remove_vector_index(knowledge_id: int):
 async def rebuild_all_indexes(db):
     """重建所有知识的向量索引（用于切换 Embedding 模型后）
 
+    仅重建 status=published 的知识，draft/archived 跳过。
+
     Returns:
         dict: {total, success, failed, skipped}
     """
@@ -428,6 +633,10 @@ async def rebuild_all_indexes(db):
     skipped = 0
     for k in items:
         try:
+            # 非发布状态跳过索引
+            if (k.status or STATUS_PUBLISHED) != STATUS_PUBLISHED:
+                skipped += 1
+                continue
             if not k.content or not k.content.strip():
                 skipped += 1
                 continue
@@ -443,6 +652,18 @@ async def rebuild_all_indexes(db):
             if not embeddings or len(embeddings) != len(chunks):
                 failed += 1
                 continue
+            # 获取 embedding 模型元信息
+            from app.services.llm_client import model_manager as _mm
+            _emb_model = ""
+            _emb_dim = len(embeddings[0]) if embeddings and embeddings[0] else 0
+            try:
+                _ec = _mm.get_active_embedding()
+                if _ec and hasattr(_ec, "config") and _ec.config:
+                    _emb_model = getattr(_ec.config, "model_name", "") or ""
+            except Exception:
+                pass
+            from datetime import datetime as _dt
+            _now = _dt.utcnow().isoformat()
             metadata = []
             for i, c in enumerate(chunks):
                 metadata.append({
@@ -450,6 +671,9 @@ async def rebuild_all_indexes(db):
                     "title": k.title,
                     "category_id": str(k.category_id) if k.category_id else "",
                     "chunk_index": i,
+                    "embedding_model": _emb_model,
+                    "embedding_dim": _emb_dim,
+                    "indexed_at": _now,
                 })
             vector_store.add(
                 knowledge_id=k.id,

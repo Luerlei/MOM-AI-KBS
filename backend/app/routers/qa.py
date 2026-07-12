@@ -8,17 +8,20 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.main import limiter
 from app.schemas.qa import QARequest, QAFeedback
 from app.services import qa_service
 from app.utils.response import success, page_result
 from app.utils.auth import require_auth
+from app.config import RATE_LIMIT_QA, RATE_LIMIT_SUGGESTIONS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.post("/ask")
-async def ask(data: QARequest, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_QA)
+async def ask(request: Request, data: QARequest, db: Session = Depends(get_db)):
     """智能问答（SSE 流式返回）"""
     import json
     from app.services.llm_client import ModelManager
@@ -42,7 +45,9 @@ async def ask(data: QARequest, db: Session = Depends(get_db)):
     async def event_stream():
         import json
         try:
-            async for chunk in qa_service.ask_stream(db, data.question, use_cache=data.use_cache):
+            # 将 history 从 Pydantic 模型转为 dict 列表
+            history = [h.dict() for h in data.history] if data.history else None
+            async for chunk in qa_service.ask_stream(db, data.question, use_cache=data.use_cache, history=history):
                 yield chunk
         except asyncio.CancelledError:
             # 客户端断开连接（关闭页面/点击停止），及时释放资源
@@ -71,7 +76,8 @@ def feedback(data: QAFeedback, db: Session = Depends(get_db)):
 
 
 @router.get("/suggestions")
-async def suggestions(question: str, answer: Optional[str] = None, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_SUGGESTIONS)
+async def suggestions(request: Request, question: str, answer: Optional[str] = None, db: Session = Depends(get_db)):
     """快捷追问推荐
 
     Args:

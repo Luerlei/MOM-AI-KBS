@@ -85,6 +85,40 @@ export function getRelatedKnowledge(id: number): Promise<Knowledge[]> {
 }
 
 /**
+ * 知识分块信息
+ */
+export interface KnowledgeChunk {
+  id: string
+  chunk_index: number
+  document: string
+  char_count: number
+  metadata: Record<string, unknown>
+  _hit?: boolean
+  _score?: number
+}
+
+/**
+ * 获取知识的向量分块列表（chunk 级别视图）
+ */
+export function getKnowledgeChunks(id: number): Promise<{ chunks: KnowledgeChunk[]; total: number }> {
+  return get<{ chunks: KnowledgeChunk[]; total: number }>(`/knowledge/${id}/chunks`)
+}
+
+/**
+ * chunk 检索测试：输入 query，返回命中的 chunk 及得分
+ */
+export function testChunkRetrieval(id: number, query: string, topK: number = 5): Promise<{ hits: Array<{ id: string; chunk_index: number; score: number; document: string }>; total: number }> {
+  return post<{ hits: Array<{ id: string; chunk_index: number; score: number; document: string }>; total: number }>(`/knowledge/${id}/test-retrieval`, { query, top_k: topK })
+}
+
+/**
+ * 重建单条知识的向量索引
+ */
+export function rebuildSingleIndex(id: number): Promise<{ success: boolean }> {
+  return post<{ success: boolean }>(`/knowledge/${id}/rebuild-index`, {})
+}
+
+/**
  * 获取下载附件的 URL
  */
 export function getDownloadUrl(knowledgeId: number, docId: number): string {

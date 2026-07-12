@@ -24,6 +24,11 @@ export interface PaginatedData<T> {
 export type ContentType = 'markdown' | 'text' | 'html'
 
 /**
+ * 知识状态
+ */
+export type KnowledgeStatus = 'draft' | 'published' | 'archived'
+
+/**
  * 知识条目附件
  */
 export interface KnowledgeDocument {
@@ -47,6 +52,8 @@ export interface Knowledge {
   tags?: Tag[]
   source_type?: string
   source_file?: string
+  status?: KnowledgeStatus
+  vector_indexed?: boolean
   documents?: KnowledgeDocument[]
   document_count?: number
   created_at: string
@@ -63,6 +70,7 @@ export interface KnowledgeQuery {
   category_id?: number
   tag_ids?: number[]
   keyword?: string
+  status?: KnowledgeStatus
 }
 
 /**
@@ -74,12 +82,13 @@ export interface KnowledgeForm {
   content_type: ContentType
   category_id: number | null
   tag_ids: number[]
+  status?: KnowledgeStatus
 }
 
 /**
  * 批量操作类型
  */
-export type BatchAction = 'delete' | 'add_tags' | 'set_category' | 'remove_tags'
+export type BatchAction = 'delete' | 'add_tags' | 'set_category' | 'remove_tags' | 'set_status'
 
 /**
  * 批量操作请求
@@ -89,6 +98,7 @@ export interface KnowledgeBatchRequest {
   action: BatchAction
   tag_ids?: number[]
   category_id?: number
+  status?: KnowledgeStatus
 }
 
 /**
@@ -149,6 +159,8 @@ export interface Skill {
   prompt_template: string
   enabled: boolean
   is_default?: boolean
+  enable_query_rewrite?: boolean
+  context_turns?: number
   created_at: string
   updated_at: string
 }
@@ -201,7 +213,7 @@ export interface SkillTestResult {
 /**
  * 模型类型
  */
-export type ModelType = 'LLM' | 'Embedding' | 'Forecast'
+export type ModelType = 'LLM' | 'Embedding' | 'Forecast' | 'Rerank'
 
 /**
  * 模型配置
@@ -699,8 +711,74 @@ export interface DecompositionResponse {
 export interface StatisticalForecastRequest {
   dataset_id: number
   horizon: number
-  model_type: 'arima' | 'ets' | 'theta'
+  model_type: 'arima' | 'ets' | 'theta' | 'prophet'
   start_index?: number | null
+  use_covariates?: boolean
+}
+
+/**
+ * 协变量类型
+ */
+export type CovariateType = 'continuous' | 'binary' | 'categorical'
+
+/**
+ * 协变量来源类型
+ */
+export type CovariateSourceType = 'manual' | 'auto' | 'template'
+
+/**
+ * 协变量值点（时间-值对）
+ */
+export interface CovariateValuePoint {
+  time: string
+  value: number
+}
+
+/**
+ * 数据集协变量（外生变量，用于 ARIMAX 等支持 exog 的模型）
+ */
+export interface Covariate {
+  id: number
+  dataset_id: number
+  name: string
+  code: string
+  type: CovariateType
+  source_type: CovariateSourceType
+  values: CovariateValuePoint[]
+  description: string
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * 协变量创建/更新请求
+ */
+export interface CovariateForm {
+  name: string
+  code: string
+  type?: CovariateType
+  source_type?: CovariateSourceType
+  values?: CovariateValuePoint[]
+  description?: string
+}
+
+/**
+ * 协变量对齐预览（用于检查时间对齐效果）
+ */
+export interface CovariatePreview {
+  columns: { title: string; key: string }[]
+  rows: Record<string, string | number>[]
+  covariate_count: number
+  point_count: number
+}
+
+/**
+ * 自动生成协变量响应
+ */
+export interface AutoGenerateCovariatesResult {
+  generated: string[]
+  skipped: string[]
+  total: number
 }
 
 /**

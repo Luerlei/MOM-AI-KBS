@@ -101,6 +101,8 @@ def _to_out(s: Skill) -> dict:
         "knowledge_scope": scope,
         "enabled": s.enabled,
         "is_default": s.is_default,
+        "enable_query_rewrite": s.enable_query_rewrite if s.enable_query_rewrite is not None else False,
+        "context_turns": s.context_turns if s.context_turns is not None else 3,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
     }
@@ -139,6 +141,8 @@ def create(db, data: SkillCreate) -> Skill:
         knowledge_scope=json.dumps(data.knowledge_scope, ensure_ascii=False),
         enabled=data.enabled,
         is_default=data.is_default,
+        enable_query_rewrite=data.enable_query_rewrite,
+        context_turns=data.context_turns,
     )
     db.add(s)
     db.commit()
@@ -168,6 +172,10 @@ def update(db, id: int, data: SkillUpdate) -> Skill:
         s.knowledge_scope = json.dumps(data.knowledge_scope, ensure_ascii=False)
     if data.enabled is not None:
         s.enabled = data.enabled
+    if data.enable_query_rewrite is not None:
+        s.enable_query_rewrite = data.enable_query_rewrite
+    if data.context_turns is not None:
+        s.context_turns = data.context_turns
     db.commit()
     db.refresh(s)
     _invalidate_skill_cache()

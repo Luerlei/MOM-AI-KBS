@@ -10,7 +10,7 @@ class ModelConfig(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, comment="配置名称")
-    type = Column(String(20), nullable=False, comment="模型类型: LLM / Embedding / Forecast")
+    type = Column(String(20), nullable=False, comment="模型类型: LLM / Embedding / Forecast / Rerank")
     api_url = Column(String(500), nullable=False, comment="API地址")
     api_key = Column(String(500), nullable=False, default="", comment="密钥（加密存储）")
     model_name = Column(String(100), nullable=False, comment="模型名称")

@@ -44,6 +44,12 @@
               <a-divider type="vertical" />
               <span class="meta-text">
                 类型：{{ contentTypeText(data.content_type) }}
+                <a-tag
+                  :color="statusColor(data.status)"
+                  style="margin-left: 8px; font-size: 12px"
+                >
+                  {{ statusText(data.status) }}
+                </a-tag>
                 <a-tag v-if="data.vector_indexed === true" color="success" style="margin-left: 8px; font-size: 12px">
                   已索引
                 </a-tag>
@@ -79,12 +85,82 @@
             </a-list>
           </a-card>
           <a-divider />
-          <!-- 内容 -->
-          <div class="detail-content">
-            <MarkdownView v-if="data.content_type === 'markdown'" :content="data.content" />
-            <div v-else-if="data.content_type === 'html'" v-html="sanitizedHtml"></div>
-            <pre v-else class="plain-text">{{ data.content }}</pre>
-          </div>
+          <!-- 内容 / 分块 Tab -->
+          <a-tabs v-model:activeKey="activeTab">
+            <a-tab-pane key="content" tab="正文内容">
+              <div class="detail-content">
+                <MarkdownView v-if="data.content_type === 'markdown'" :content="data.content" />
+                <div v-else-if="data.content_type === 'html'" v-html="sanitizedHtml"></div>
+                <pre v-else class="plain-text">{{ data.content }}</pre>
+              </div>
+            </a-tab-pane>
+            <a-tab-pane key="chunks" :tab="`向量分块 (${chunks.length})`">
+              <a-spin :spinning="chunksLoading">
+                <div class="chunks-toolbar" style="margin-bottom: 12px;">
+                  <a-space wrap>
+                    <a-button size="small" :loading="rebuildLoading" @click="handleRebuildIndex">
+                      <ReloadOutlined />重建索引
+                    </a-button>
+                    <a-tooltip title="分块大小 500 字符，重叠 50 字符。重建索引会重新分块并生成 Embedding。">
+                      <InfoCircleOutlined style="color: rgba(0,0,0,0.45)" />
+                    </a-tooltip>
+                    <a-divider type="vertical" />
+                    <span v-if="chunksEmbeddingModel" class="chunk-meta-info">
+                      <a-tag color="purple" size="small">{{ chunksEmbeddingModel }}</a-tag>
+                      <span v-if="chunksEmbeddingDim" class="chunk-meta">维度 {{ chunksEmbeddingDim }}</span>
+                    </span>
+                    <span v-if="chunksIndexedAt" class="chunk-meta">索引于 {{ formatTime(chunksIndexedAt) }}</span>
+                  </a-space>
+                </div>
+                <!-- chunk 检索测试面板 -->
+                <div class="chunk-test-panel" style="margin-bottom: 12px;">
+                  <a-input-group compact>
+                    <a-input
+                      v-model:value="testQuery"
+                      placeholder="输入测试查询，查看命中的分块及得分..."
+                      style="width: calc(100% - 80px)"
+                      allow-clear
+                      @press-enter="runTestRetrieval"
+                    />
+                    <a-button
+                      type="primary"
+                      size="small"
+                      style="width: 80px"
+                      :loading="testLoading"
+                      :disabled="!testQuery.trim()"
+                      @click="runTestRetrieval"
+                    >
+                      <SearchOutlined />测试
+                    </a-button>
+                  </a-input-group>
+                  <div v-if="testHits.length > 0" class="test-hits-info" style="margin-top: 8px;">
+                    <a-alert type="info" show-icon :message="`命中 ${testHits.length} 个分块（按得分排序）`" />
+                  </div>
+                </div>
+                <a-empty v-if="!chunksLoading && chunks.length === 0" description="暂无向量分块（未索引或未配置 Embedding 模型）" />
+                <div v-else class="chunk-list">
+                  <a-card
+                    v-for="chunk in chunks"
+                    :key="chunk.id"
+                    size="small"
+                    class="chunk-card"
+                    :class="{ 'chunk-hit': chunk._hit }"
+                  >
+                    <template #title>
+                      <span class="chunk-title">
+                        <a-tag color="blue">分块 #{{ chunk.chunk_index }}</a-tag>
+                        <span class="chunk-meta">{{ chunk.char_count }} 字符</span>
+                        <a-tag v-if="chunk._score != null" color="orange" size="small">
+                          得分 {{ (chunk._score * 100).toFixed(1) }}%
+                        </a-tag>
+                      </span>
+                    </template>
+                    <div class="chunk-content">{{ chunk.document }}</div>
+                  </a-card>
+                </div>
+              </a-spin>
+            </a-tab-pane>
+          </a-tabs>
         </a-card>
       </a-col>
 
@@ -127,13 +203,25 @@ import {
   EditOutlined,
   DeleteOutlined,
   ArrowLeftOutlined,
-  DownloadOutlined
+  DownloadOutlined,
+  ReloadOutlined,
+  InfoCircleOutlined,
+  SearchOutlined
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import dayjs from 'dayjs'
 import MarkdownView from '@/components/MarkdownView.vue'
 import DOMPurify from 'dompurify'
-import { getKnowledgeDetail, getRelatedKnowledge, getDownloadUrl, deleteKnowledge } from '@/api/knowledge'
+import {
+  getKnowledgeDetail,
+  getRelatedKnowledge,
+  getDownloadUrl,
+  deleteKnowledge,
+  getKnowledgeChunks,
+  rebuildSingleIndex,
+  testChunkRetrieval,
+  type KnowledgeChunk
+} from '@/api/knowledge'
 import type { Knowledge } from '@/types'
 
 const route = useRoute()
@@ -153,8 +241,56 @@ const sanitizedHtml = computed(() => {
 
 const loading = ref(false)
 const relatedLoading = ref(false)
+const chunksLoading = ref(false)
+const rebuildLoading = ref(false)
 const data = ref<Knowledge | null>(null)
 const relatedList = ref<Knowledge[]>([])
+const chunks = ref<KnowledgeChunk[]>([])
+const activeTab = ref('content')
+
+// chunk 检索测试
+const testQuery = ref('')
+const testLoading = ref(false)
+const testHits = ref<Array<{ id: string; chunk_index: number; score: number; document: string }>>([])
+
+async function runTestRetrieval(): Promise<void> {
+  if (!data.value || !testQuery.value.trim()) return
+  testLoading.value = true
+  try {
+    const res = await testChunkRetrieval(data.value.id, testQuery.value.trim(), 5)
+    testHits.value = res.hits || []
+    // 高亮命中的 chunk
+    const hitIds = new Set(testHits.value.map((h) => h.id))
+    const scoreMap = new Map(testHits.value.map((h) => [h.id, h.score]))
+    chunks.value = chunks.value.map((c) => ({
+      ...c,
+      _hit: hitIds.has(c.id),
+      _score: scoreMap.get(c.id),
+    }))
+    if (testHits.value.length === 0) {
+      message.info('未命中任何分块')
+    }
+  } catch {
+    testHits.value = []
+    message.error('检索测试失败')
+  } finally {
+    testLoading.value = false
+  }
+}
+
+// embedding 元信息（从第一个 chunk 的 metadata 提取）
+const chunksEmbeddingModel = computed(() => {
+  const first = chunks.value[0]
+  return (first?.metadata as Record<string, unknown>)?.embedding_model as string || ''
+})
+const chunksEmbeddingDim = computed(() => {
+  const first = chunks.value[0]
+  return (first?.metadata as Record<string, unknown>)?.embedding_dim as number || 0
+})
+const chunksIndexedAt = computed(() => {
+  const first = chunks.value[0]
+  return (first?.metadata as Record<string, unknown>)?.indexed_at as string || ''
+})
 
 async function fetchDetail(id: number): Promise<void> {
   loading.value = true
@@ -162,10 +298,41 @@ async function fetchDetail(id: number): Promise<void> {
   try {
     data.value = await getKnowledgeDetail(id)
     fetchRelated(id)
+    fetchChunks(id)
   } catch {
     // ignore
   } finally {
     loading.value = false
+  }
+}
+
+async function fetchChunks(id: number): Promise<void> {
+  chunksLoading.value = true
+  try {
+    const res = await getKnowledgeChunks(id)
+    chunks.value = (res.chunks || []).map((c: KnowledgeChunk) => ({ ...c, _hit: false, _score: undefined as number | undefined }))
+  } catch {
+    chunks.value = []
+  } finally {
+    chunksLoading.value = false
+  }
+}
+
+async function handleRebuildIndex(): Promise<void> {
+  if (!data.value) return
+  rebuildLoading.value = true
+  try {
+    const res = await rebuildSingleIndex(data.value.id)
+    if (res.success) {
+      message.success('索引重建成功')
+      fetchChunks(data.value.id)
+    } else {
+      message.warning('索引重建失败（可能未配置 Embedding 或状态非已发布）')
+    }
+  } catch {
+    // ignore
+  } finally {
+    rebuildLoading.value = false
   }
 }
 
@@ -255,6 +422,24 @@ function contentTypeText(type: string): string {
   return map[type] || type
 }
 
+function statusText(status: string | undefined): string {
+  const map: Record<string, string> = {
+    published: '已发布',
+    draft: '草稿',
+    archived: '已归档'
+  }
+  return map[status || 'published'] || '已发布'
+}
+
+function statusColor(status: string | undefined): string {
+  const map: Record<string, string> = {
+    published: 'success',
+    draft: 'default',
+    archived: 'warning'
+  }
+  return map[status || 'published'] || 'success'
+}
+
 function formatTime(time: string): string {
   return dayjs(time).format('YYYY-MM-DD HH:mm')
 }
@@ -327,6 +512,54 @@ onMounted(() => {
 .detail-content {
   min-height: 200px;
   line-height: 1.8;
+}
+
+.chunk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chunk-card {
+  background: #fafafa;
+}
+
+.chunk-hit {
+  background: #fffbe6;
+  border-color: #ffe58f;
+}
+
+.chunk-meta-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chunk-test-panel {
+  padding: 8px 12px;
+  background: #f5f5f5;
+  border-radius: 4px;
+}
+
+.chunk-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chunk-meta {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.chunk-content {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(0, 0, 0, 0.75);
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .plain-text {

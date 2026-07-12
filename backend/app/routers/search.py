@@ -2,20 +2,24 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.main import limiter
 from app.services import search_service
 from app.utils.response import success, page_result
 from app.utils.auth import require_auth
+from app.config import RATE_LIMIT_SEARCH
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 logger = logging.getLogger(__name__)
 
 
 @router.get("/semantic")
+@limiter.limit(RATE_LIMIT_SEARCH)
 async def semantic_search(
+    request: Request,
     query: str,
     category_id: Optional[int] = None,
     tag_ids: Optional[str] = None,
@@ -46,7 +50,9 @@ async def semantic_search(
 
 
 @router.get("/keyword")
+@limiter.limit(RATE_LIMIT_SEARCH)
 def keyword_search(
+    request: Request,
     query: str,
     category_id: Optional[int] = None,
     tag_ids: Optional[str] = None,

@@ -24,6 +24,7 @@ class Knowledge(Base):
     category_id = Column(Integer, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, comment="分类目录")
     source_type = Column(String(20), default="manual", comment="来源：upload/manual")
     source_file = Column(String(255), nullable=True, comment="原始文件名")
+    status = Column(String(20), default="published", comment="状态: draft(草稿)/published(发布)/archived(归档)")
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
     updated_at = Column(String, default=lambda: datetime.utcnow().isoformat(), onupdate=lambda: datetime.utcnow().isoformat())
 

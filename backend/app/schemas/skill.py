@@ -13,6 +13,8 @@ class SkillBase(BaseModel):
     prompt_template: str = ""
     knowledge_scope: dict = {}
     enabled: bool = True
+    enable_query_rewrite: bool = False
+    context_turns: int = 3
 
 
 class SkillCreate(SkillBase):
@@ -29,6 +31,8 @@ class SkillUpdate(BaseModel):
     prompt_template: Optional[str] = None
     knowledge_scope: Optional[dict] = None
     enabled: Optional[bool] = None
+    enable_query_rewrite: Optional[bool] = None
+    context_turns: Optional[int] = None
 
 
 class SkillOut(SkillBase):

@@ -1,4 +1,6 @@
 """LLM 客户端抽象层（OpenAI 兼容格式）"""
+import asyncio
+import contextvars
 import logging
 import os
 import ssl
@@ -12,6 +14,9 @@ from app.utils.response import APIError
 
 logger = logging.getLogger(__name__)
 
+# B-4: 使用 contextvars 隔离并发请求的 last_usage，避免单例客户端共享可变状态导致串号
+_last_usage_var: contextvars.ContextVar[dict] = contextvars.ContextVar("llm_last_usage", default={})
+
 
 def _build_ssl_context() -> ssl.SSLContext:
     """构建 SSL 上下文。
@@ -24,6 +29,17 @@ def _build_ssl_context() -> ssl.SSLContext:
         logger.warning("[security] SSL_SECLEVEL=1 已启用，降低了证书校验安全级别")
         ctx.set_ciphers("DEFAULT@SECLEVEL=1")
     return ctx
+
+
+# B-2: 可重试的异常类型
+_RETRYABLE_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+)
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 2
+_RETRY_DELAYS = [0.5, 1.5]  # 秒，指数退避
 
 
 class LLMClient(ABC):
@@ -69,8 +85,17 @@ class OpenAICompatibleClient(LLMClient):
         self.model_name = config.model_name
         self.api_key = decrypt(config.api_key) if config.api_key else ""
         self.type = config.type
-        # 最近一次 chat_stream 的 usage 信息（供调用方在流结束后读取）
-        self.last_usage: dict = {}
+        # B-4: last_usage 改为 contextvars 属性，隔离并发请求
+
+    @property
+    def last_usage(self) -> dict:
+        """B-4: 从 contextvars 读取，隔离并发请求"""
+        return _last_usage_var.get()
+
+    @last_usage.setter
+    def last_usage(self, value: dict):
+        """B-4: 写入 contextvars，隔离并发请求"""
+        _last_usage_var.set(value)
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -92,42 +117,68 @@ class OpenAICompatibleClient(LLMClient):
         payload.update(kwargs)
 
         start = time.time()
-        async with httpx.AsyncClient(timeout=120.0, verify=_build_ssl_context(), trust_env=False) as client:
-            resp = await client.post(
-                f"{self.api_url}/chat/completions",
-                headers=self._headers(),
-                json=payload,
-            )
-            duration_ms = int((time.time() - start) * 1000)
-            if resp.status_code != 200:
-                # 记录上游响应详情到日志（便于排查），但不返回给客户端（可能含敏感信息）
-                logger.error(
-                    f"[LLM.chat] 上游响应非 200: status={resp.status_code} url={self.api_url}/chat/completions "
-                    f"model={self.model_name} body={resp.text[:500]}"
-                )
+        # B-2: 重试机制（对网络错误和 5xx/429 重试）
+        last_exc = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=120.0, verify=_build_ssl_context(), trust_env=False) as client:
+                    resp = await client.post(
+                        f"{self.api_url}/chat/completions",
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                duration_ms = int((time.time() - start) * 1000)
+                if resp.status_code != 200:
+                    logger.error(
+                        f"[LLM.chat] 上游响应非 200: status={resp.status_code} url={self.api_url}/chat/completions "
+                        f"model={self.model_name} body={resp.text[:500]}"
+                    )
+                    if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
+                        logger.warning(
+                            f"[LLM.chat] HTTP {resp.status_code} 触发重试 "
+                            f"attempt={attempt + 1}/{_MAX_RETRIES}"
+                        )
+                        last_exc = APIError(
+                            f"LLM 调用失败（HTTP {resp.status_code}）", status_code=502
+                        )
+                        await asyncio.sleep(_RETRY_DELAYS[attempt])
+                        continue
+                    raise APIError(
+                        f"LLM 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
+                        status_code=502,
+                    )
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                usage = data.get("usage", {})
+                input_tokens = usage.get("prompt_tokens", 0)
+                output_tokens = usage.get("completion_tokens", 0)
+                self.last_usage = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "model": data.get("model", self.model_name),
+                    "total_tokens": usage.get("total_tokens", 0),
+                }
+                return {
+                    "content": content,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "model": data.get("model", self.model_name),
+                    "duration_ms": duration_ms,
+                }
+            except _RETRYABLE_EXCEPTIONS as e:
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        f"[LLM.chat] 网络异常触发重试 attempt={attempt + 1}/{_MAX_RETRIES}: {e}"
+                    )
+                    last_exc = e
+                    await asyncio.sleep(_RETRY_DELAYS[attempt])
+                    continue
                 raise APIError(
-                    f"LLM 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
-                    status_code=502,
+                    f"LLM 调用网络异常（已重试 {_MAX_RETRIES} 次）: {e}", status_code=502
                 )
-            data = resp.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            usage = data.get("usage", {})
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
-            # 同步设置 last_usage，供调用方读取（与 chat_stream/embed 行为一致）
-            self.last_usage = {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "model": data.get("model", self.model_name),
-                "total_tokens": usage.get("total_tokens", 0),
-            }
-            return {
-                "content": content,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "model": data.get("model", self.model_name),
-                "duration_ms": duration_ms,
-            }
+        if last_exc:
+            raise APIError(f"LLM 调用失败（已耗尽重试）: {last_exc}", status_code=502)
+        raise APIError("LLM 调用失败（未知错误）", status_code=502)
 
     async def chat_stream(self, messages: list, **kwargs) -> AsyncGenerator[str, None]:
         """流式对话补全，逐步 yield 文本片段
@@ -207,36 +258,63 @@ class OpenAICompatibleClient(LLMClient):
             "model": self.model_name,
             "input": texts,
         }
-        async with httpx.AsyncClient(timeout=120.0, verify=_build_ssl_context(), trust_env=False) as client:
-            resp = await client.post(
-                f"{self.api_url}/embeddings",
-                headers=self._headers(),
-                json=payload,
-            )
-            if resp.status_code != 200:
-                # 记录上游响应详情到日志（便于排查），但不返回给客户端
-                logger.error(
-                    f"[LLM.embedding] 上游响应非 200: status={resp.status_code} "
-                    f"url={self.api_url}/embeddings model={self.model_name} "
-                    f"body={resp.text[:500]}"
-                )
+        # B-2: 重试机制
+        last_exc = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=120.0, verify=_build_ssl_context(), trust_env=False) as client:
+                    resp = await client.post(
+                        f"{self.api_url}/embeddings",
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                if resp.status_code != 200:
+                    logger.error(
+                        f"[LLM.embedding] 上游响应非 200: status={resp.status_code} "
+                        f"url={self.api_url}/embeddings model={self.model_name} "
+                        f"body={resp.text[:500]}"
+                    )
+                    if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
+                        logger.warning(
+                            f"[LLM.embedding] HTTP {resp.status_code} 触发重试 "
+                            f"attempt={attempt + 1}/{_MAX_RETRIES}"
+                        )
+                        last_exc = APIError(
+                            f"Embedding 调用失败（HTTP {resp.status_code}）", status_code=502
+                        )
+                        await asyncio.sleep(_RETRY_DELAYS[attempt])
+                        continue
+                    raise APIError(
+                        f"Embedding 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
+                        status_code=502,
+                    )
+                data = resp.json()
+                usage = data.get("usage", {})
+                self.last_usage = {
+                    "input_tokens": usage.get("prompt_tokens", sum(len(str(t)) // 4 for t in texts) or 1),
+                    "output_tokens": 0,
+                    "model": data.get("model", self.model_name),
+                    "duration_ms": int((_time.time() - _start) * 1000),
+                    "total_tokens": usage.get("total_tokens", 0),
+                }
+                # 按 index 排序保证顺序
+                items = data.get("data", [])
+                items_sorted = sorted(items, key=lambda x: x.get("index", 0))
+                return [item.get("embedding", []) for item in items_sorted]
+            except _RETRYABLE_EXCEPTIONS as e:
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        f"[LLM.embedding] 网络异常触发重试 attempt={attempt + 1}/{_MAX_RETRIES}: {e}"
+                    )
+                    last_exc = e
+                    await asyncio.sleep(_RETRY_DELAYS[attempt])
+                    continue
                 raise APIError(
-                    f"Embedding 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
-                    status_code=502,
+                    f"Embedding 调用网络异常（已重试 {_MAX_RETRIES} 次）: {e}", status_code=502
                 )
-            data = resp.json()
-            usage = data.get("usage", {})
-            self.last_usage = {
-                "input_tokens": usage.get("prompt_tokens", sum(len(str(t)) // 4 for t in texts) or 1),
-                "output_tokens": 0,
-                "model": data.get("model", self.model_name),
-                "duration_ms": int((_time.time() - _start) * 1000),
-                "total_tokens": usage.get("total_tokens", 0),
-            }
-            # 按 index 排序保证顺序
-            items = data.get("data", [])
-            items_sorted = sorted(items, key=lambda x: x.get("index", 0))
-            return [item.get("embedding", []) for item in items_sorted]
+        if last_exc:
+            raise APIError(f"Embedding 调用失败（已耗尽重试）: {last_exc}", status_code=502)
+        raise APIError("Embedding 调用失败（未知错误）", status_code=502)
 
 
 class ForecastClient:
@@ -254,7 +332,13 @@ class ForecastClient:
         """
         from app.utils.crypto import decrypt
         self.config = config
-        self.api_url = config.api_url.rstrip("/")
+        # 兼容用户填写带后缀的 URL：自动去掉 /predict 后缀（避免拼成 /predict/predict）
+        url = config.api_url.rstrip("/")
+        for suffix in ("/predict",):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+                break
+        self.api_url = url
         self.model_name = config.model_name
         self.api_key = decrypt(config.api_key) if config.api_key else ""
         # 最近一次预测的元信息（供调用方读取）
@@ -267,13 +351,16 @@ class ForecastClient:
         return headers
 
     async def predict(self, series: list, horizon: int,
-                      quantiles: list = None) -> dict:
+                      quantiles: list = None,
+                      exog_train=None, exog_future=None) -> dict:
         """时序预测
 
         Args:
             series: 历史观测值序列
             horizon: 预测步数
             quantiles: 分位数列表，默认 [0.1, 0.5, 0.9]
+            exog_train: 训练集协变量矩阵（预留，当前基础模型不支持，会忽略）
+            exog_future: 未来协变量矩阵（预留，当前基础模型不支持，会忽略）
 
         Returns:
             dict: {forecasts, quantiles, model, duration_ms, input_points, output_points}
@@ -288,41 +375,178 @@ class ForecastClient:
             "horizon": horizon,
             "quantiles": quantiles or [0.1, 0.5, 0.9],
         }
+        # 协变量预留接口：当前 Chronos/TimesFM 不支持 exog，仅记录日志
+        # 未来对接支持协变量的基础模型（如 Moirai）时，在此传入 exog
+        if exog_train is not None:
+            import logging
+            logging.getLogger(__name__).info(
+                f"[ForecastClient] {self.model_name} 不支持协变量，已忽略 exog"
+            )
         start = time.time()
-        async with httpx.AsyncClient(timeout=180.0, verify=_build_ssl_context(), trust_env=False) as client:
+        # B-2: 重试机制
+        last_exc = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=180.0, verify=_build_ssl_context(), trust_env=False) as client:
+                    resp = await client.post(
+                        f"{self.api_url}/predict",
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                duration_ms = int((time.time() - start) * 1000)
+                if resp.status_code != 200:
+                    # B-3: 不暴露上游响应体，详情记日志
+                    logger.error(
+                        f"[ForecastClient] 调用失败 status={resp.status_code} "
+                        f"url={self.api_url} body={resp.text[:300]}"
+                    )
+                    if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
+                        logger.warning(
+                            f"[ForecastClient] HTTP {resp.status_code} 触发重试 "
+                            f"attempt={attempt + 1}/{_MAX_RETRIES}"
+                        )
+                        last_exc = APIError(
+                            f"Forecast 调用失败（HTTP {resp.status_code}）", status_code=502
+                        )
+                        await asyncio.sleep(_RETRY_DELAYS[attempt])
+                        continue
+                    raise APIError(
+                        f"Forecast 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
+                        status_code=502,
+                    )
+                data = resp.json()
+                forecasts = data.get("forecasts", [])
+                quantile_result = data.get("quantiles", {})
+                model = data.get("model", self.model_name)
+                # Forecast 是时序预测，没有 token 概念；用 input_points/output_points 记录点数，
+                # 保留 input_tokens/output_tokens 仅向后兼容旧的日志读取代码。
+                self.last_usage = {
+                    "input_tokens": 0,                # Forecast 不消耗 token
+                    "output_tokens": 0,               # Forecast 不消耗 token
+                    "input_points": len(series),      # 输入数据点数
+                    "output_points": len(forecasts),  # 输出数据点数
+                    "model": model,
+                    "duration_ms": duration_ms,
+                }
+                return {
+                    "forecasts": forecasts,
+                    "quantiles": quantile_result,
+                    "model": model,
+                    "duration_ms": duration_ms,
+                    "input_points": len(series),
+                    "output_points": len(forecasts),
+                }
+            except _RETRYABLE_EXCEPTIONS as e:
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        f"[ForecastClient] 网络异常触发重试 attempt={attempt + 1}/{_MAX_RETRIES}: {e}"
+                    )
+                    last_exc = e
+                    await asyncio.sleep(_RETRY_DELAYS[attempt])
+                    continue
+                raise APIError(
+                    f"Forecast 调用网络异常（已重试 {_MAX_RETRIES} 次）: {e}", status_code=502
+                )
+        if last_exc:
+            raise APIError(f"Forecast 调用失败（已耗尽重试）: {last_exc}", status_code=502)
+        raise APIError("Forecast 调用失败（未知错误）", status_code=502)
+
+
+class RerankClient:
+    """Rerank 重排序客户端（Jina/Cohere/硅基流动等兼容 API）
+
+    约定 rerank API 端点：POST {api_url}/rerank
+        请求: {model, query, documents: [{text}], top_n}
+        响应: {results: [{index, relevance_score}]}
+    """
+
+    def __init__(self, config):
+        from app.utils.crypto import decrypt
+        self.config = config
+        # 兼容用户填写带后缀的 URL：自动去掉 /rerank 后缀（避免拼成 /rerank/rerank）
+        url = config.api_url.rstrip("/")
+        for suffix in ("/rerank",):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+                break
+        self.api_url = url
+        self.model_name = config.model_name
+        self.api_key = decrypt(config.api_key) if config.api_key else ""
+        self.last_usage: dict = {}
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def rerank(self, query: str, documents: list, top_n: int = 5) -> list:
+        """对文档列表按与 query 的相关性重排序
+
+        Args:
+            query: 查询文本
+            documents: 文档文本列表 [{text: "..."}] 或纯字符串列表
+            top_n: 返回前 N 个
+
+        Returns:
+            list of dict: [{index, relevance_score, document}] 按分数降序
+        """
+        if not documents:
+            return []
+
+        # 统一提取纯文本：兼容 [{text: "..."}] 和 ["str"] 两种输入
+        doc_texts = []
+        for d in documents:
+            if isinstance(d, str):
+                doc_texts.append(d)
+            elif isinstance(d, dict):
+                doc_texts.append(d.get("text", d.get("document", "")))
+            else:
+                doc_texts.append(str(d))
+
+        # SiliconFlow/阿里百炼 要求 documents 为 array[string]；
+        # Jina/Cohere 同时支持 array[string] 和 array[{text}]，统一发 string 列表兼容性最好
+        payload = {
+            "model": self.model_name,
+            "query": query,
+            "documents": doc_texts,
+            "top_n": min(top_n, len(doc_texts)),
+        }
+
+        start = time.time()
+        async with httpx.AsyncClient(timeout=60.0, verify=_build_ssl_context(), trust_env=False) as client:
             resp = await client.post(
-                f"{self.api_url}/predict",
+                f"{self.api_url}/rerank",
                 headers=self._headers(),
                 json=payload,
             )
             duration_ms = int((time.time() - start) * 1000)
             if resp.status_code != 200:
+                logger.error(
+                    f"[RerankClient] 上游响应非 200: status={resp.status_code} "
+                    f"url={self.api_url}/rerank model={self.model_name} body={resp.text[:500]}"
+                )
                 raise APIError(
-                    f"Forecast 调用失败({resp.status_code}): {resp.text[:200]}",
+                    f"Rerank 调用失败（HTTP {resp.status_code}），请检查模型配置。",
                     status_code=502,
                 )
             data = resp.json()
-            forecasts = data.get("forecasts", [])
-            quantile_result = data.get("quantiles", {})
-            model = data.get("model", self.model_name)
-            # Forecast 是时序预测，没有 token 概念；用 input_points/output_points 记录点数，
-            # 保留 input_tokens/output_tokens 仅向后兼容旧的日志读取代码。
+            results = data.get("results", [])
             self.last_usage = {
-                "input_tokens": 0,                # Forecast 不消耗 token
-                "output_tokens": 0,               # Forecast 不消耗 token
-                "input_points": len(series),      # 输入数据点数
-                "output_points": len(forecasts),  # 输出数据点数
-                "model": model,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "model": self.model_name,
                 "duration_ms": duration_ms,
             }
-            return {
-                "forecasts": forecasts,
-                "quantiles": quantile_result,
-                "model": model,
-                "duration_ms": duration_ms,
-                "input_points": len(series),
-                "output_points": len(forecasts),
-            }
+            # 返回格式: [{index, relevance_score, document}]
+            return [
+                {
+                    "index": r.get("index", i),
+                    "relevance_score": r.get("relevance_score", 0.0),
+                    "document": doc_texts[r.get("index", i)] if r.get("index", i) < len(doc_texts) else "",
+                }
+                for i, r in enumerate(results)
+            ]
 
 
 class ModelManager:
@@ -447,6 +671,12 @@ class ModelManager:
         if config:
             cls._cache["Forecast"] = ForecastClient(config)
             cls._cache_config_id["Forecast"] = config.id
+
+    @classmethod
+    def get_active_rerank(cls) -> Optional["RerankClient"]:
+        """获取启用的 Rerank 客户端（可选配置，未配置时返回 None）"""
+        client = cls._get_or_create_client("Rerank", lambda c: RerankClient(c))
+        return client  # None 表示未配置，调用方应跳过 rerank 步骤
 
 
 model_manager = ModelManager()

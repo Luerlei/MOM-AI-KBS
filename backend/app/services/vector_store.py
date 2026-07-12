@@ -192,6 +192,52 @@ class VectorStore:
             })
         return out
 
+    def get_batch_by_knowledge_ids(self, knowledge_ids: list, limit_per_kid: int = 1) -> dict:
+        """批量获取多个 knowledge_id 的向量数据（K-5: 避免 N+1 查询）
+
+        Args:
+            knowledge_ids: 知识 ID 列表
+            limit_per_kid: 每个 knowledge 最多返回的 chunk 数
+
+        Returns:
+            dict: {knowledge_id: [{id, document, metadata, score}]}
+        """
+        if not knowledge_ids:
+            return {}
+        collection = _get_collection(self.KNOWLEDGE_COLLECTION)
+        result_map = {}
+        try:
+            # ChromaDB 支持 $in 操作符批量查询
+            results = collection.get(
+                where={"knowledge_id": {"$in": knowledge_ids}},
+                limit=limit_per_kid * len(knowledge_ids),
+            )
+        except Exception:
+            # $in 不支持时回退到逐个查询
+            logger.warning(f"[VectorStore.get_batch] $in 查询失败，回退到逐个查询")
+            for kid in knowledge_ids:
+                result_map[kid] = self.get_by_knowledge_id(kid, limit_per_kid)
+            return result_map
+
+        ids = results.get("ids", [])
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+        for i in range(len(ids)):
+            meta = metas[i] if i < len(metas) else {}
+            kid = int(meta.get("knowledge_id", 0)) if meta.get("knowledge_id") else 0
+            if not kid:
+                continue
+            if kid not in result_map:
+                result_map[kid] = []
+            if len(result_map[kid]) < limit_per_kid:
+                result_map[kid].append({
+                    "id": ids[i],
+                    "document": docs[i] if i < len(docs) else "",
+                    "metadata": meta,
+                    "score": 0.0,
+                })
+        return result_map
+
     # -------- 答案缓存 collection --------
     def add_to_cache(self, question: str, answer_dict: dict, question_embedding: list):
         """将问答对写入缓存
@@ -201,13 +247,17 @@ class VectorStore:
             answer_dict: 答案字典（包含 answer, sources, skill_id, skill_name 等）
             question_embedding: 问题的向量
         """
+        from datetime import datetime
         collection = _get_collection(self.CACHE_COLLECTION)
         cache_id = str(uuid.uuid4())
         collection.add(
             ids=[cache_id],
             documents=[question],
             embeddings=[question_embedding],
-            metadatas=[{"payload": json.dumps(answer_dict, ensure_ascii=False)}],
+            metadatas=[{
+                "payload": json.dumps(answer_dict, ensure_ascii=False),
+                "created_at": datetime.utcnow().isoformat(),
+            }],
         )
 
     def search_cache(self, query_embedding: list, threshold: float = None) -> Optional[dict]:
@@ -239,6 +289,21 @@ class VectorStore:
         if score < threshold:
             return None
         meta = metas[0] if metas else {}
+
+        # TTL 检查：超过过期时间的缓存视为未命中
+        from app.config import CACHE_TTL_SECONDS
+        from datetime import datetime, timedelta
+        created_at_str = meta.get("created_at")
+        if created_at_str:
+            try:
+                created_at = datetime.fromisoformat(created_at_str)
+                if datetime.utcnow() - created_at > timedelta(seconds=CACHE_TTL_SECONDS):
+                    logger.info(f"[search_cache] 缓存已过期（created_at={created_at_str}），跳过")
+                    return None
+            except (ValueError, TypeError):
+                # created_at 格式异常时忽略 TTL 检查（兼容旧数据）
+                pass
+
         payload = meta.get("payload", "{}")
         try:
             return json.loads(payload)

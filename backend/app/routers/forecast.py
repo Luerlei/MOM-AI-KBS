@@ -1,15 +1,17 @@
 """时序预测路由"""
 import io
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.main import limiter
 from app.services import forecast_service
 from app.utils.response import success, page_result, APIError
 from app.utils.auth import require_auth
+from app.config import RATE_LIMIT_FORECAST
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 
@@ -20,7 +22,8 @@ def _content_disposition(filename: str) -> str:
 
 
 @router.post("/predict")
-async def predict(data: dict, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_FORECAST)
+async def predict(request: Request, data: dict, db: Session = Depends(get_db)):
     """执行预测
 
     Body: {dataset_id: int, horizon: int, quantiles?: [float], start_index?: int, skip_analysis?: bool}
@@ -79,7 +82,8 @@ def get_trend_analysis(dataset_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/cross-validation")
-async def cross_validation(data: dict, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_FORECAST)
+async def cross_validation(request: Request, data: dict, db: Session = Depends(get_db)):
     """交叉验证：多次回测取平均
 
     Body: {dataset_id: int, n_splits?: int, horizon?: int, strategy?: "expanding"|"sliding", skip_analysis?: bool}
@@ -100,7 +104,8 @@ async def cross_validation(data: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/compare-models")
-async def compare_models(data: dict, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_FORECAST)
+async def compare_models(request: Request, data: dict, db: Session = Depends(get_db)):
     """多模型对比回测
 
     Body: {dataset_id: int, horizon?: int, start_index?: int}
@@ -118,10 +123,13 @@ async def compare_models(data: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/statistical-forecast")
-async def statistical_forecast(data: dict, db: Session = Depends(get_db)):
-    """统计模型预测（ARIMA/ETS/Theta，纯本地计算）
+@limiter.limit(RATE_LIMIT_FORECAST)
+async def statistical_forecast(request: Request, data: dict, db: Session = Depends(get_db)):
+    """统计模型预测（ARIMA/ETS/Theta/Prophet，纯本地计算）
 
-    Body: {dataset_id: int, horizon: int, model_type: "arima"|"ets"|"theta", start_index?: int}
+    Body: {dataset_id: int, horizon: int, model_type: "arima"|"ets"|"theta"|"prophet",
+           start_index?: int, use_covariates?: bool}
+    use_covariates=True 时 ARIMA/Prophet 会使用数据集的协变量（exog）。
     """
     dataset_id = data.get("dataset_id")
     if not dataset_id:
@@ -131,12 +139,14 @@ async def statistical_forecast(data: dict, db: Session = Depends(get_db)):
         raise APIError("horizon 必须为正整数", status_code=400)
     model_type = data.get("model_type", "arima")
     start_index = data.get("start_index")
+    use_covariates = bool(data.get("use_covariates", False))
 
     # ARIMA 网格搜索是 CPU 密集型同步操作，放入线程池避免阻塞事件循环
     result = await run_in_threadpool(
         forecast_service.run_statistical_forecast,
         db, dataset_id=dataset_id, horizon=horizon,
         model_type=model_type, start_index=start_index,
+        use_covariates=use_covariates,
     )
     return success(result, message=f"{model_type.upper()} 统计模型预测完成")
 
@@ -146,6 +156,111 @@ def get_decomposition_api(dataset_id: int, db: Session = Depends(get_db)):
     """获取数据集的 STL 季节性分解结果"""
     result = forecast_service.get_decomposition(db, dataset_id)
     return success(result)
+
+
+@router.post("/auto-select")
+async def auto_select_model(data: dict, db: Session = Depends(get_db)):
+    """自动模型选择：对所有可用模型做交叉验证，推荐 MAE 最优模型
+
+    Body: {dataset_id: int, horizon?: int, n_splits?: int, strategy?: str}
+    """
+    dataset_id = data.get("dataset_id")
+    if not dataset_id:
+        raise APIError("dataset_id 不能为空", status_code=400)
+    horizon = data.get("horizon", 6)
+    n_splits = data.get("n_splits", 3)
+    strategy = data.get("strategy", "expanding")
+
+    result = await forecast_service.auto_select_model(
+        db, dataset_id=dataset_id, horizon=horizon,
+        n_splits=n_splits, strategy=strategy,
+    )
+    return success(result, message="自动模型选择完成")
+
+
+@router.post("/ensemble")
+async def ensemble_forecast(data: dict, db: Session = Depends(get_db)):
+    """集成预测：组合多个模型的预测结果
+
+    Body: {dataset_id: int, horizon: int, start_index?: int,
+           models?: [str], strategy?: "weighted_avg"|"median"|"simple_avg"}
+    """
+    dataset_id = data.get("dataset_id")
+    if not dataset_id:
+        raise APIError("dataset_id 不能为空", status_code=400)
+    horizon = data.get("horizon", 6)
+    if not isinstance(horizon, int) or horizon <= 0:
+        raise APIError("horizon 必须为正整数", status_code=400)
+    start_index = data.get("start_index")
+    models = data.get("models")
+    strategy = data.get("strategy", "weighted_avg")
+
+    result = await forecast_service.ensemble_forecast(
+        db, dataset_id=dataset_id, horizon=horizon,
+        start_index=start_index, models=models, strategy=strategy,
+    )
+    return success(result, message="集成预测完成")
+
+
+@router.get("/features/{dataset_id}")
+def get_advanced_features(dataset_id: int, db: Session = Depends(get_db)):
+    """获取数据集的高级特征工程结果（滞后/滚动/傅里叶/差分/动量）"""
+    from app.services.dataset_service import _load_series
+    from app.models import Dataset
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise APIError("数据集不存在", status_code=404)
+    series = _load_series(ds.series_data)
+    values = [p["value"] for p in series]
+    result = forecast_service.generate_advanced_features(values, ds.frequency)
+    return success(result)
+
+
+@router.post("/anomaly-detection")
+def detect_anomalies_api(data: dict, db: Session = Depends(get_db)):
+    """统计异常检测
+
+    Body: {dataset_id: int, method?: "stl_residual"|"isolation_forest"|"change_point",
+           contamination?: float}
+    """
+    from app.services.dataset_service import _load_series
+    from app.models import Dataset
+
+    dataset_id = data.get("dataset_id")
+    if not dataset_id:
+        raise APIError("dataset_id 不能为空", status_code=400)
+    method = data.get("method", "stl_residual")
+    contamination = float(data.get("contamination", 0.05))
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise APIError("数据集不存在", status_code=404)
+    series = _load_series(ds.series_data)
+    values = [p["value"] for p in series]
+    result = forecast_service.detect_anomalies(values, ds.frequency, method, contamination)
+    return success(result)
+
+
+@router.post("/optimize-params")
+def optimize_params(data: dict, db: Session = Depends(get_db)):
+    """超参优化：网格搜索统计模型的最优参数
+
+    Body: {dataset_id: int, model_type: "ets"|"arima"|"prophet"|"theta",
+           horizon?: int, n_trials?: int}
+    """
+    dataset_id = data.get("dataset_id")
+    if not dataset_id:
+        raise APIError("dataset_id 不能为空", status_code=400)
+    model_type = data.get("model_type", "ets")
+    horizon = data.get("horizon", 6)
+    n_trials = data.get("n_trials", 20)
+
+    result = forecast_service.optimize_stat_model_params(
+        db, dataset_id=dataset_id, model_type=model_type,
+        horizon=horizon, n_trials=n_trials,
+    )
+    return success(result, message=f"{model_type.upper()} 超参优化完成")
 
 
 @router.get("/export/{task_id}")

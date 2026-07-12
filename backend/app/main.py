@@ -6,12 +6,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.config import DEBUG, get_cors_origins, validate_security_config
 from app.database import init_db
 from app.utils.response import success, error, APIError
 
 logger = logging.getLogger(__name__)
+
+# 速率限制器（按客户端 IP 限流）
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
@@ -37,6 +43,10 @@ app = FastAPI(
     debug=DEBUG,
     lifespan=lifespan,
 )
+
+# 注册速率限制
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS：从环境变量 CORS_ORIGINS 读取（逗号分隔），开发环境默认 *，
 # 生产环境应明确指定来源（如 http://localhost:5173,https://your.domain）
@@ -118,7 +128,7 @@ async def root():
 
 
 # 注册路由
-from app.routers import knowledge, category, tag, skill, skill_option, model_config, search, qa, dashboard, token_stats, dataset, forecast, auth  # noqa: E402
+from app.routers import knowledge, category, tag, skill, skill_option, model_config, search, qa, dashboard, token_stats, dataset, forecast, covariate, auth  # noqa: E402
 
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识管理"])
@@ -133,3 +143,4 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["首页"])
 app.include_router(token_stats.router, prefix="/api/token-stats", tags=["Token统计"])
 app.include_router(dataset.router, prefix="/api/datasets", tags=["数据集管理"])
 app.include_router(forecast.router, prefix="/api/forecast", tags=["时序预测"])
+app.include_router(covariate.router, prefix="/api", tags=["协变量管理"])

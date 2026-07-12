@@ -149,6 +149,24 @@
           </a-col>
         </a-row>
 
+        <!-- RAG 高级设置 -->
+        <a-card title="RAG 高级设置" size="small" style="margin-bottom: 16px">
+          <a-row :gutter="16">
+            <a-col :xs="24" :md="12">
+              <a-form-item label="查询改写">
+                <a-switch v-model:checked="form.enable_query_rewrite" />
+                <span class="setting-hint">启用后，结合对话历史消解指代词（如"它"、"这个"），提升多轮对话检索质量</span>
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="12">
+              <a-form-item label="上下文轮数">
+                <a-input-number v-model:value="form.context_turns" :min="1" :max="10" style="width: 100%" />
+                <span class="setting-hint">查询改写时参考的最近对话轮数（每轮 = 用户问题 + AI回答）</span>
+              </a-form-item>
+            </a-col>
+          </a-row>
+        </a-card>
+
         <a-form-item label="Prompt 模板" name="prompt_template" required>
           <div class="prompt-hint">
             支持变量：

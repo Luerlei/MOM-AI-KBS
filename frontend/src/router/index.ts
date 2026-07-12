@@ -98,6 +98,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '数据集管理', breadcrumb: ['首页', '时序分析', '数据集管理'] }
       },
       {
+        path: 'datasets/:id/covariates',
+        name: 'DatasetCovariates',
+        component: () => import('@/views/dataset/Covariates.vue'),
+        meta: { title: '协变量管理', breadcrumb: ['首页', '时序分析', '数据集管理', '协变量管理'] }
+      },
+      {
         path: 'trends',
         name: 'Trends',
         component: () => import('@/views/Trends.vue'),

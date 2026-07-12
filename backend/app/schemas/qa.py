@@ -3,9 +3,15 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 
+class QAHistoryItem(BaseModel):
+    role: str  # "user" / "assistant"
+    content: str
+
+
 class QARequest(BaseModel):
     question: str
     use_cache: bool = True
+    history: List[QAHistoryItem] = []  # 多轮对话历史
 
 
 class QASource(BaseModel):

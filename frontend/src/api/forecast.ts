@@ -91,8 +91,63 @@ export function getDecomposition(datasetId: number): Promise<DecompositionRespon
 }
 
 /**
- * 统计模型预测（ARIMA/ETS/Theta）
+ * 统计模型预测（ARIMA/ETS/Theta/Prophet）
  */
 export function runStatisticalForecast(data: StatisticalForecastRequest): Promise<ForecastPredictResponse> {
   return post<ForecastPredictResponse>('/forecast/statistical-forecast', data, { timeout: 120000 })
+}
+
+/**
+ * 自动模型选择（B1）
+ */
+export function autoSelectModel(data: {
+  dataset_id: number
+  horizon?: number
+  n_splits?: number
+  strategy?: string
+}): Promise<any> {
+  return post<any>('/forecast/auto-select', data, { timeout: 600000 })
+}
+
+/**
+ * 集成预测（B2）
+ */
+export function ensembleForecast(data: {
+  dataset_id: number
+  horizon: number
+  start_index?: number | null
+  models?: string[]
+  strategy?: 'weighted_avg' | 'median' | 'simple_avg'
+}): Promise<any> {
+  return post<any>('/forecast/ensemble', data, { timeout: 300000 })
+}
+
+/**
+ * 高级特征工程（B3）
+ */
+export function getAdvancedFeatures(datasetId: number): Promise<any> {
+  return get<any>(`/forecast/features/${datasetId}`)
+}
+
+/**
+ * 统计异常检测（B4）
+ */
+export function detectAnomalies(data: {
+  dataset_id: number
+  method?: 'stl_residual' | 'isolation_forest' | 'change_point'
+  contamination?: number
+}): Promise<any> {
+  return post<any>('/forecast/anomaly-detection', data)
+}
+
+/**
+ * 超参优化（B5）
+ */
+export function optimizeParams(data: {
+  dataset_id: number
+  model_type: 'ets' | 'arima' | 'prophet' | 'theta'
+  horizon?: number
+  n_trials?: number
+}): Promise<any> {
+  return post<any>('/forecast/optimize-params', data, { timeout: 300000 })
 }

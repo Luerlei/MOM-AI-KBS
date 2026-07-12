@@ -56,7 +56,7 @@
               />
             </a-form-item>
           </a-col>
-          <a-col :xs="24" :md="12">
+          <a-col :xs="24" :md="6">
             <a-form-item label="标签" name="tag_ids">
               <TagSelect
                 v-model="form.tag_ids"
@@ -64,6 +64,15 @@
                 placeholder="选择或创建标签"
                 @create="onCreateTag"
               />
+            </a-form-item>
+          </a-col>
+          <a-col :xs="24" :md="6">
+            <a-form-item label="状态" name="status">
+              <a-select v-model:value="form.status" placeholder="选择状态">
+                <a-select-option value="published">已发布（可检索）</a-select-option>
+                <a-select-option value="draft">草稿（不可检索）</a-select-option>
+                <a-select-option value="archived">已归档（不可检索）</a-select-option>
+              </a-select>
             </a-form-item>
           </a-col>
         </a-row>
@@ -118,7 +127,7 @@ import {
   getDownloadUrl
 } from '@/api/knowledge'
 import { getCategoryTree, getTagList, createTag } from '@/api/category'
-import type { KnowledgeForm, Category, Tag, ContentType, KnowledgeDocument } from '@/types'
+import type { KnowledgeForm, Category, Tag, ContentType, KnowledgeDocument, KnowledgeStatus } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -134,7 +143,8 @@ const form = ref<KnowledgeForm>({
   content: '',
   content_type: 'markdown',
   category_id: null,
-  tag_ids: []
+  tag_ids: [],
+  status: 'published'
 })
 
 const rules = {
@@ -153,7 +163,8 @@ async function fetchDetail(id: number): Promise<void> {
       content: data.content,
       content_type: data.content_type,
       category_id: data.category_id,
-      tag_ids: data.tag_ids || []
+      tag_ids: data.tag_ids || [],
+      status: (data.status as KnowledgeStatus) || 'published'
     }
     documents.value = data.documents || []
   } catch {
@@ -213,7 +224,8 @@ async function handleSave(): Promise<void> {
       content: form.value.content,
       content_type: form.value.content_type as ContentType,
       category_id: form.value.category_id,
-      tag_ids: form.value.tag_ids
+      tag_ids: form.value.tag_ids,
+      status: form.value.status || 'published'
     }
     if (isEdit.value) {
       await updateKnowledge(Number(route.params.id), payload)
@@ -241,7 +253,8 @@ watch(
         content: '',
         content_type: 'markdown',
         category_id: null,
-        tag_ids: []
+        tag_ids: [],
+        status: 'published'
       }
     }
   }

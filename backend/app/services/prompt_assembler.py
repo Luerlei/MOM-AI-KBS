@@ -18,16 +18,17 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
 
-def assemble(skill, question: str, context_chunks: list) -> list:
+def assemble(skill, question: str, context_chunks: list, history: list = None) -> list:
     """组装 LLM messages
 
     Args:
         skill: Skill ORM 对象
         question: 用户问题
         context_chunks: 检索到的知识片段列表 [{document, metadata, score}]
+        history: 对话历史 [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
 
     Returns:
-        list[dict]: [{"role":"system","content":prompt}, {"role":"user","content":question}]
+        list[dict]: [{"role":"system","content":prompt}, ...history, {"role":"user","content":question}]
     """
     # 组装上下文文本，带长度控制
     context_text = ""
@@ -73,7 +74,13 @@ def assemble(skill, question: str, context_chunks: list) -> list:
     # 替换变量
     prompt = template.replace("{context}", context_text).replace("{question}", question)
 
-    return [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": question},
-    ]
+    # K-1: 组装多轮对话消息：system + history + 当前 question
+    messages = [{"role": "system", "content": prompt}]
+    if history:
+        for msg in history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
+    return messages

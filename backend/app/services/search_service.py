@@ -13,6 +13,11 @@ from app.services.vector_store import vector_store
 logger = logging.getLogger(__name__)
 
 
+def _escape_like(value: str) -> str:
+    """转义 LIKE 模式中的特殊字符（% _ \），防止被当通配符"""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def semantic_search(db, query: str, category_id: Optional[int] = None,
                     tag_ids: Optional[list] = None,
                     date_from: Optional[str] = None, date_to: Optional[str] = None,
@@ -41,10 +46,12 @@ async def semantic_search(db, query: str, category_id: Optional[int] = None,
     knowledge_map = {}
     if all_kids:
         # 使用 joinedload 避免 N+1 懒加载（category + tags）
+        # 状态过滤：仅返回 published 状态的知识（draft/archived 不出现在搜索结果）
         k_list = (
             db.query(Knowledge)
             .options(joinedload(Knowledge.category), joinedload(Knowledge.tags))
             .filter(Knowledge.id.in_(all_kids))
+            .filter(Knowledge.status == "published")
             .all()
         )
         knowledge_map = {k.id: k for k in k_list}
@@ -109,6 +116,8 @@ def keyword_search(db, query: str, category_id: Optional[int] = None,
     from app.services.rag_service import _tokenize_keywords
 
     q = db.query(Knowledge).options(joinedload(Knowledge.category), joinedload(Knowledge.tags))
+    # 状态过滤：仅搜索 published 状态的知识
+    q = q.filter(Knowledge.status == "published")
     if category_id:
         q = q.filter(Knowledge.category_id == category_id)
     if tag_ids:
@@ -119,12 +128,14 @@ def keyword_search(db, query: str, category_id: Optional[int] = None,
     if keywords:
         conditions = []
         for kw in keywords:
-            conditions.append(Knowledge.title.like(f"%{kw}%"))
-            conditions.append(Knowledge.content.like(f"%{kw}%"))
+            esc_kw = _escape_like(kw)
+            conditions.append(Knowledge.title.like(f"%{esc_kw}%", escape="\\"))
+            conditions.append(Knowledge.content.like(f"%{esc_kw}%", escape="\\"))
         q = q.filter(or_(*conditions))
     else:
         # 回退：整句子串匹配（单字符查询或纯标点）
-        q = q.filter(Knowledge.title.like(f"%{query}%") | Knowledge.content.like(f"%{query}%"))
+        esc_query = _escape_like(query)
+        q = q.filter(Knowledge.title.like(f"%{esc_query}%", escape="\\") | Knowledge.content.like(f"%{esc_query}%", escape="\\"))
 
     if date_from:
         q = q.filter(Knowledge.created_at >= date_from)

@@ -9,6 +9,7 @@ class KnowledgeBase(BaseModel):
     content_type: str = "markdown"
     category_id: Optional[int] = None
     tag_ids: List[int] = []
+    status: str = "published"  # draft(草稿) / published(发布) / archived(归档)
 
 
 class KnowledgeCreate(KnowledgeBase):
@@ -21,6 +22,7 @@ class KnowledgeUpdate(BaseModel):
     content_type: Optional[str] = None
     category_id: Optional[int] = None
     tag_ids: Optional[List[int]] = None
+    status: Optional[str] = None  # draft / published / archived
 
 
 class KnowledgeOut(BaseModel):
@@ -32,6 +34,7 @@ class KnowledgeOut(BaseModel):
     category_name: Optional[str] = None
     source_type: str
     source_file: Optional[str] = None
+    status: str = "published"
     tag_ids: List[int] = []
     tag_names: List[str] = []
     created_at: str
@@ -80,6 +83,7 @@ class TagOut(TagBase):
 
 class BatchOperation(BaseModel):
     ids: List[int]
-    action: str  # delete / add_tag / move_category
+    action: str  # delete / add_tag(s) / move_category / set_category / set_status
     tag_ids: Optional[List[int]] = None
     category_id: Optional[int] = None
+    status: Optional[str] = None  # set_status 时使用: draft / published / archived

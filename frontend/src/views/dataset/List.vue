@@ -80,6 +80,8 @@
             <a-divider type="vertical" />
             <a @click="onEvalHistory(record)">评估记录</a>
             <a-divider type="vertical" />
+            <a @click="onCovariates(record)">协变量</a>
+            <a-divider type="vertical" />
             <a-dropdown>
               <a>更多 <DownOutlined /></a>
               <template #overlay>
@@ -285,7 +287,7 @@ const columns: TableColumnsType = [
   { title: '单位', dataIndex: 'unit', key: 'unit', width: 80 },
   { title: '来源', dataIndex: 'source', key: 'source', width: 80 },
   { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 160 },
-  { title: '操作', key: 'action', width: 330, fixed: 'right' },
+  { title: '操作', key: 'action', width: 400, fixed: 'right' },
 ]
 
 const dataColumns: TableColumnsType = [
@@ -573,6 +575,11 @@ function onAnalyze(record: Dataset) {
 // ========== 跳转评估记录 ==========
 function onEvalHistory(record: Dataset) {
   router.push(`/trends?dataset_id=${record.id}`)
+}
+
+// ========== 跳转协变量管理 ==========
+function onCovariates(record: Dataset) {
+  router.push(`/datasets/${record.id}/covariates`)
 }
 
 // ========== 下载模板 ==========

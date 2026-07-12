@@ -31,6 +31,22 @@ CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "*")
 # 缓存相似度阈值（MOM制造术语变化小，0.90比0.95更合理）
 CACHE_SIMILARITY_THRESHOLD: float = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.90"))
 
+# 缓存过期时间（秒），默认 7 天
+CACHE_TTL_SECONDS: int = int(os.getenv("CACHE_TTL_SECONDS", str(7 * 24 * 3600)))
+
+# RAG 检索相似度阈值：低于此分数的 chunk 不纳入上下文
+RAG_RELEVANCE_THRESHOLD: float = float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0.3"))
+
+# 速率限制配置（每分钟请求数）
+RATE_LIMIT_QA: str = os.getenv("RATE_LIMIT_QA", "30/minute")        # 问答（含流式）
+RATE_LIMIT_SEARCH: str = os.getenv("RATE_LIMIT_SEARCH", "60/minute")  # 搜索（较轻）
+RATE_LIMIT_FORECAST: str = os.getenv("RATE_LIMIT_FORECAST", "10/minute")  # 预测（重负载）
+RATE_LIMIT_SUGGESTIONS: str = os.getenv("RATE_LIMIT_SUGGESTIONS", "60/minute")  # 追问推荐
+
+# 查询改写缓存配置
+QUERY_REWRITE_CACHE_TTL: int = int(os.getenv("QUERY_REWRITE_CACHE_TTL", str(30 * 60)))  # 30 分钟
+QUERY_REWRITE_CACHE_MAXSIZE: int = int(os.getenv("QUERY_REWRITE_CACHE_MAXSIZE", "500"))
+
 # 确保数据目录存在
 Path(VECTOR_DB_PATH).mkdir(parents=True, exist_ok=True)
 Path(UPLOAD_PATH).mkdir(parents=True, exist_ok=True)

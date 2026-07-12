@@ -226,8 +226,9 @@ def export_dataset_excel(name: str, frequency: str, unit: str, series_data: list
             ws.cell(row=r, column=6, value=p10[i] if i < len(p10) else "")
             ws.cell(row=r, column=7, value=p90[i] if i < len(p90) else "")
             if has_actuals and i < len(actuals):
-                ws.cell(row=r, column=8, value=actuals[i])
-                ws.cell(row=r, column=9, value=round(actuals[i] - fc, 4))
+                ws.cell(row=r, column=8, value=actuals[i] if actuals[i] is not None else "")
+                # F-4: 防御 actuals[i] 为 None
+                ws.cell(row=r, column=9, value=round(actuals[i] - fc, 4) if actuals[i] is not None else "")
 
     # 元信息 sheet
     ws2 = wb.create_sheet("元信息")
@@ -418,8 +419,9 @@ def export_dataset_csv(name: str, frequency: str, unit: str, series_data: list,
                 p90[i] if i < len(p90) else "",
             ]
             if has_actuals and i < len(actuals):
-                row.append(actuals[i])
-                row.append(round(actuals[i] - fc, 4))
+                # F-4: 防御 actuals[i] 为 None
+                row.append(actuals[i] if actuals[i] is not None else "")
+                row.append(round(actuals[i] - fc, 4) if actuals[i] is not None else "")
             elif has_actuals:
                 row += ["", ""]
             writer.writerow(row)

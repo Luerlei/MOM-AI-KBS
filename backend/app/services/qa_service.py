@@ -15,7 +15,7 @@ from app.utils.response import APIError
 logger = logging.getLogger(__name__)
 
 
-async def ask(db, question: str, use_cache: bool = True):
+async def ask(db, question: str, use_cache: bool = True, history: list = None):
     """完整问答流程"""
     start = time.time()
     # 1. Skill 路由
@@ -24,7 +24,8 @@ async def ask(db, question: str, use_cache: bool = True):
     # 2. 检查缓存
     cached = None
     q_embedding = None
-    if use_cache:
+    if use_cache and not history:
+        # 有对话历史时不查缓存（改写后的查询与原缓存不匹配）
         try:
             vecs = await embedding_service.embed([question], source="qa_cache")
             if vecs:
@@ -59,7 +60,7 @@ async def ask(db, question: str, use_cache: bool = True):
         return cached
 
     # 3. RAG 检索 + 生成（N8: 复用已计算的 q_embedding 避免重复 Embedding）
-    result = await rag_service.answer(question, skill, db, q_embedding=q_embedding)
+    result = await rag_service.answer(question, skill, db, q_embedding=q_embedding, history=history)
     duration_ms = int((time.time() - start) * 1000)
 
     # 4. 保存 QAHistory
@@ -121,7 +122,7 @@ async def ask(db, question: str, use_cache: bool = True):
     }
 
 
-async def ask_stream(db, question: str, use_cache: bool = True) -> AsyncGenerator[str, None]:
+async def ask_stream(db, question: str, use_cache: bool = True, history: list = None) -> AsyncGenerator[str, None]:
     """SSE 流式问答
 
     yield: f"data: {json.dumps(chunk)}\n\n"
@@ -132,8 +133,9 @@ async def ask_stream(db, question: str, use_cache: bool = True) -> AsyncGenerato
                 "match_type": match_type, "score": score})
 
     # 1b. 检查缓存（命中则一次性推送完整答案，跳过 RAG 流式）
+    # 有对话历史时不查缓存（改写后的查询与原缓存不匹配）
     q_embedding = None  # N8: 保存查询向量供 RAG 和写缓存复用
-    if use_cache:
+    if use_cache and not history:
         cached = None
         cache_start = time.time()
         try:
@@ -203,7 +205,7 @@ async def ask_stream(db, question: str, use_cache: bool = True) -> AsyncGenerato
     start = time.time()
     cancelled = False
     try:
-        async for chunk in rag_service.answer_stream(question, skill, db, q_embedding=q_embedding):
+        async for chunk in rag_service.answer_stream(question, skill, db, q_embedding=q_embedding, history=history):
             if chunk["type"] == "sources":
                 sources = chunk["sources"]
                 degraded = chunk.get("degraded", False)

@@ -118,10 +118,27 @@ async def test_connection(db, id: int) -> ModelTestResult:
     每次测试都会记录 TokenUsage 日志（call_type=test, source=test_model）
     """
     config = get_by_id(db, id)
-    from app.services.llm_client import OpenAICompatibleClient, ForecastClient
+    from app.services.llm_client import OpenAICompatibleClient, ForecastClient, RerankClient
 
     start = time.time()
     try:
+        if config.type == "Rerank":
+            # Rerank 模型：发送简单 rerank 请求测试连通性
+            rr = RerankClient(config)
+            ranked = await rr.rerank("test", ["文档内容A", "文档内容B"], top_n=2)
+            latency = int((time.time() - start) * 1000)
+            usage = getattr(rr, "last_usage", {}) or {}
+            _log_test_usage(
+                db, config,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=0,
+                latency_ms=latency,
+            )
+            return ModelTestResult(
+                success=True,
+                message=f"连接成功，重排序返回 {len(ranked)} 条结果",
+                latency_ms=latency,
+            )
         if config.type == "Forecast":
             # 时序预测模型：发送短序列测试 /predict 端点
             client = ForecastClient(config)

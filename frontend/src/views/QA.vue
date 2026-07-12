@@ -58,6 +58,10 @@
                 <div v-if="!msg.streaming && msg.degraded" class="msg-degraded">
                   <WarningOutlined /> 当前为降级模式（未配置 Embedding 模型），仅使用关键词检索，检索质量可能下降
                 </div>
+                <!-- 低置信度提示 -->
+                <div v-if="!msg.streaming && msg.low_confidence && !msg.degraded" class="msg-low-confidence">
+                  <WarningOutlined /> 以下回答基于低相关性资料，请谨慎参考
+                </div>
                 <!-- Skill & Token -->
                 <div v-if="!msg.streaming" class="msg-meta">
                   <span v-if="msg.skill_name">
@@ -156,6 +160,7 @@ import {
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
 import { askQuestionStream, submitFeedback, getSuggestions } from '@/api/qa'
 import type { QAReference } from '@/types'
 
@@ -172,6 +177,7 @@ interface ChatMessage {
   total_tokens?: number
   feedback?: 'useful' | 'useless' | null
   degraded?: boolean
+  low_confidence?: boolean
 }
 
 const messages = ref<ChatMessage[]>([])
@@ -203,7 +209,10 @@ function renderAnswer(text: string, sources?: QAReference[]): string {
       return match
     })
   }
-  return html
+  // 统一过 DOMPurify，防止 LLM 输出中的潜在 XSS
+  return DOMPurify.sanitize(html, {
+    ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class', 'target', 'rel', 'data-kid'],
+  })
 }
 
 function escapeHtml(str: string): string {
@@ -225,6 +234,15 @@ async function onSend(): Promise<void> {
   const q = inputQuestion.value.trim()
   if (!q || streaming.value) return
 
+  // 构建对话历史（排除当前问题，取最近 6 轮）
+  const history = messages.value
+    .filter((m) => m.content && !m.streaming)
+    .slice(-6)
+    .map((m) => ({
+      role: m.role === 'ai' ? 'assistant' : 'user',
+      content: m.content
+    }))
+
   // 添加用户消息
   messages.value.push({ role: 'user', content: q })
   // 添加 AI 占位
@@ -245,6 +263,7 @@ async function onSend(): Promise<void> {
 
   await askQuestionStream(q, {
     use_cache: true,
+    history,
     signal: abortController.signal,
     onMessage: (_chunk, fullText) => {
       aiMsg.content = fullText
@@ -256,6 +275,7 @@ async function onSend(): Promise<void> {
       if (data.sources) aiMsg.sources = data.sources as QAReference[]
       if (data.tokens) aiMsg.total_tokens = data.tokens
       if (data.degraded) aiMsg.degraded = true
+      if (data.low_confidence) aiMsg.low_confidence = true
       streaming.value = false
       loadSuggestions(q)
     },
@@ -508,6 +528,19 @@ onMounted(() => {
   color: #d46b08;
   background: #fff7e6;
   border: 1px solid #ffd591;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.msg-low-confidence {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #cf1322;
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
   border-radius: 4px;
   display: flex;
   align-items: center;

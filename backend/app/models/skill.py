@@ -17,6 +17,8 @@ class Skill(Base):
     trigger_patterns = Column(Text, default="[]", comment='触发模式(正则) JSON: ["E\\d+"]')
     prompt_template = Column(Text, nullable=False, default="", comment="Prompt模板，含{context}{question}变量")
     knowledge_scope = Column(Text, default="{}", comment='知识范围 JSON: {"category_ids":[],"tag_ids":[]}')
+    enable_query_rewrite = Column(Boolean, default=False, comment="是否启用查询改写（结合对话历史消解指代）")
+    context_turns = Column(Integer, default=3, comment="多轮对话上下文轮数（用于查询改写时取最近N轮）")
     enabled = Column(Boolean, default=True, comment="启用状态")
     is_default = Column(Boolean, default=False, comment="是否默认Skill")
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
