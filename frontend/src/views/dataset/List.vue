@@ -435,10 +435,8 @@ async function onMenuAction(key: string, record: Dataset) {
     editForm.frequency = record.frequency
     editForm.unit = record.unit
     editForm.description = record.description
-    // 加载完整数据
+    // 加载完整数据（详情接口返回 series_data）
     try {
-      const detail = await getDatasetList({ keyword: record.name, page: 1, page_size: 1 })
-      // 详情接口返回 series_data
       const res = await import('@/api/dataset').then(m => m.getDatasetDetail(record.id))
       editForm.series_data = (res.series_data || []).map(p => ({ ...p }))
     } catch {

@@ -6,15 +6,16 @@ from app.database import get_db
 from app.models import Tag
 from app.schemas.knowledge import TagCreate
 from app.utils.response import success, APIError
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("")
 def list_tags(db: Session = Depends(get_db)):
     """标签列表"""
     tags = db.query(Tag).order_by(Tag.id).all()
-    return success([{"id": t.id, "name": t.name} for t in tags])
+    return success([{"id": t.id, "name": t.name, "color": t.color} for t in tags])
 
 
 @router.post("")
@@ -23,11 +24,11 @@ def create_tag(data: TagCreate, db: Session = Depends(get_db)):
     existing = db.query(Tag).filter(Tag.name == data.name).first()
     if existing:
         raise APIError("标签已存在")
-    t = Tag(name=data.name)
+    t = Tag(name=data.name, color=data.color)
     db.add(t)
     db.commit()
     db.refresh(t)
-    return success({"id": t.id, "name": t.name}, message="创建成功")
+    return success({"id": t.id, "name": t.name, "color": t.color}, message="创建成功")
 
 
 @router.delete("/{tid}")

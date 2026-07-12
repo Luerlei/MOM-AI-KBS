@@ -20,7 +20,7 @@ class Knowledge(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(200), nullable=False, comment="标题")
     content = Column(Text, nullable=False, default="", comment="内容（Markdown）")
-    content_type = Column(String(50), default="标准文档", comment="类型：标准文档/经验知识/培训资料/数据报表")
+    content_type = Column(String(50), default="markdown", comment="内容格式：markdown/text/html")
     category_id = Column(Integer, ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, comment="分类目录")
     source_type = Column(String(20), default="manual", comment="来源：upload/manual")
     source_file = Column(String(255), nullable=True, comment="原始文件名")

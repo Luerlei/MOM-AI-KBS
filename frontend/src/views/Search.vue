@@ -99,7 +99,7 @@
                     <a-list-item>
                       <a-list-item-meta>
                         <template #title>
-                          <a @click="goDetail(item.id)" v-html="highlightTitle(item)"></a>
+                          <a @click="goDetail(item.id || item.knowledge_id)" v-html="highlightTitle(item)"></a>
                         </template>
                         <template #description>
                           <div
@@ -113,11 +113,14 @@
                           <a-tag color="blue">{{ item.category_name }}</a-tag>
                         </span>
                         <a-tag
-                          v-for="tag in item.tags"
+                          v-for="tag in (item.tags || [])"
                           :key="tag.id"
                           :color="tag.color || 'default'"
                         >
                           {{ tag.name }}
+                        </a-tag>
+                        <a-tag v-for="(tn, i) in (item.tag_names || [])" :key="'tn'+i" color="default">
+                          {{ tn }}
                         </a-tag>
                         <span v-if="item.score" class="result-score">
                           相关度: {{ (item.score * 100).toFixed(1) }}%

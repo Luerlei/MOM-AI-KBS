@@ -70,6 +70,43 @@
       </a-spin>
     </a-card>
 
+    <!-- 成本估算 -->
+    <a-card style="margin-bottom: 16px">
+      <template #title>
+        成本估算
+        <a-tooltip title="基于模型配置的单价（元/千 token）估算，未配置单价的模型不计入成本">
+          <InfoCircleOutlined style="color: rgba(0,0,0,0.45); margin-left: 4px" />
+        </a-tooltip>
+      </template>
+      <template #extra>
+        <a-statistic
+          title="总成本"
+          :value="costEstimate.total_cost"
+          :precision="2"
+          prefix="¥"
+          :value-style="{ color: '#cf1322' }"
+        />
+      </template>
+      <a-table
+        :columns="costColumns"
+        :data-source="costByModel"
+        :loading="loading"
+        :pagination="false"
+        row-key="model_name"
+        size="small"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'cost'">
+            <span :class="{ 'cost-zero': record.cost === 0 }">¥ {{ record.cost.toFixed(4) }}</span>
+          </template>
+        </template>
+      </a-table>
+      <a-empty
+        v-if="!loading && costByModel.length === 0"
+        description="暂无成本数据（请在模型配置页设置单价）"
+      />
+    </a-card>
+
     <!-- 分布图 -->
     <a-row :gutter="16">
       <a-col :xs="24" :lg="12">
@@ -133,6 +170,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { InfoCircleOutlined } from '@ant-design/icons-vue'
 import type { Dayjs } from 'dayjs'
 import * as echarts from 'echarts'
 import {
@@ -149,7 +187,9 @@ import type {
   TokenStatsQuery,
   Skill,
   CacheStats,
-  CallLog
+  CallLog,
+  CostEstimate,
+  CostEstimateItem
 } from '@/types'
 
 const loading = ref(false)
@@ -204,6 +244,24 @@ const cacheStats = computed<CacheStats>(
 )
 
 const cacheHitRate = computed(() => cacheStats.value.cache_hit_rate)
+
+// 成本估算
+const costEstimate = computed<CostEstimate>(
+  () =>
+    summary.value?.cost_estimate ?? {
+      total_cost: 0,
+      by_model: []
+    }
+)
+
+const costByModel = computed<CostEstimateItem[]>(() => costEstimate.value.by_model)
+
+const costColumns = [
+  { title: '模型', dataIndex: 'model_name', key: 'model_name', ellipsis: true },
+  { title: '输入 Token', dataIndex: 'input_tokens', key: 'input_tokens', width: 120, align: 'right' as const },
+  { title: '输出 Token', dataIndex: 'output_tokens', key: 'output_tokens', width: 120, align: 'right' as const },
+  { title: '成本(元)', dataIndex: 'cost', key: 'cost', width: 120, align: 'right' as const }
+]
 
 // 调用日志弹窗
 const callLogVisible = ref(false)
@@ -452,5 +510,9 @@ onUnmounted(() => {
 .clickable-card:hover {
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.cost-zero {
+  color: rgba(0, 0, 0, 0.35);
 }
 </style>

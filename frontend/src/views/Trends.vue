@@ -52,6 +52,21 @@
           <template #icon><ThunderboltOutlined /></template>
           开始预测
         </a-button>
+        <a-divider type="vertical" />
+        <a-select
+          v-model:value="selectedStatModel"
+          placeholder="统计模型"
+          style="width: 120px"
+          :options="statModelOptions"
+        />
+        <a-button
+          :loading="runningStatForecast"
+          :disabled="!selectedDatasetId"
+          @click="onRunStatForecast"
+        >
+          <template #icon><ThunderboltOutlined /></template>
+          统计预测
+        </a-button>
         <a-button
           :disabled="!analysisText && !predicting"
           :loading="predicting"
@@ -59,6 +74,20 @@
         >
           <template #icon><FileTextOutlined /></template>
           AI分析报告
+        </a-button>
+        <a-button
+          :disabled="!selectedDatasetId"
+          @click="cvDrawerVisible = true"
+        >
+          <template #icon><ExperimentOutlined /></template>
+          交叉验证
+        </a-button>
+        <a-button
+          :disabled="!selectedDatasetId"
+          @click="compareDrawerVisible = true"
+        >
+          <template #icon><BarChartOutlined /></template>
+          多模型对比
         </a-button>
         <a-tag v-if="switchingModel" color="processing">切换中...</a-tag>
       </a-space>
@@ -198,6 +227,22 @@
             <span class="meta-item"><b>RMSE：</b>{{ fmtVal(metricsData.rmse) }}{{ unitText }}</span>
             <span class="meta-item"><b>最大误差：</b>{{ fmtVal(metricsData.max_error) }}{{ unitText }}</span>
           </div>
+          <!-- 回测扩展指标 -->
+          <div v-if="isBacktest && hasActuals && hasExtendedMetrics" class="long-summary-meta" style="margin-top: 8px">
+            <span class="meta-item"><b>MASE：</b>{{ metricVal(metricsData, 'mase').toFixed(4) }}</span>
+            <span class="meta-item"><b>sMAPE：</b>{{ metricVal(metricsData, 'smape').toFixed(2) }}%</span>
+            <span class="meta-item"><b>Pinball Loss：</b>{{ metricVal(metricsData, 'pinball_loss').toFixed(4) }}</span>
+            <span class="meta-item"><b>Coverage：</b>{{ metricVal(metricsData, 'coverage').toFixed(2) }}%</span>
+            <span class="meta-item">
+              <b>rMAE：</b>
+              <a-tag :color="metricVal(metricsData, 'rmae') < 1 ? 'green' : 'red'" style="margin: 0">
+                {{ metricVal(metricsData, 'rmae').toFixed(4) }}
+              </a-tag>
+              <span class="param-hint">{{ metricVal(metricsData, 'rmae') < 1 ? '优于Naive' : '不如Naive' }}</span>
+            </span>
+            <span class="meta-item"><b>Naive基线MAE：</b>{{ fmtVal(baselineVal(metricsData, 'naive_mae')) }}{{ unitText }}</span>
+            <span class="meta-item"><b>SeasonalNaive基线MAE：</b>{{ fmtVal(baselineVal(metricsData, 'seasonal_naive_mae')) }}{{ unitText }}</span>
+          </div>
           <a-divider v-if="summaryText" style="margin: 12px 0" />
           <div v-if="summaryText" class="long-summary-text">{{ summaryText }}</div>
           <a-empty v-else-if="!forecastInfo" description="尚未执行预测" :image="simpleImage" />
@@ -220,6 +265,44 @@
           <span class="legend-item"><i class="band"></i>0.1-0.9 置信区间</span>
           <span class="legend-item"><i class="dot label"></i>标注点</span>
         </div>
+      </a-card>
+
+      <!-- 季节性分解（STL） -->
+      <a-card title="季节性分解（STL）" style="margin-bottom: 16px">
+        <template #extra>
+          <a-button
+            type="primary"
+            size="small"
+            :loading="decompLoading"
+            :disabled="!selectedDatasetId"
+            @click="onGenerateDecomp"
+          >生成分解</a-button>
+        </template>
+        <a-spin :spinning="decompLoading">
+          <div v-if="decompData && decompData.success" class="decomp-info">
+            <a-tag color="blue">季节性强度：{{ (decompData.seasonal_strength ?? 0).toFixed(4) }}</a-tag>
+            <a-tag color="orange">季节振幅：{{ (decompData.seasonal_amplitude ?? 0).toFixed(4) }}</a-tag>
+            <a-tag v-if="decompData.frequency" color="green">频率：{{ decompData.frequency }}</a-tag>
+            <a-tag v-if="decompData.preprocess" color="default">
+              预处理：填充 {{ decompData.preprocess.missing_filled }} 个缺失，修正 {{ decompData.preprocess.outliers_fixed }} 个异常
+            </a-tag>
+          </div>
+          <div
+            v-if="decompData && decompData.success"
+            ref="decompChartRef"
+            class="decomp-chart-container"
+          ></div>
+          <a-empty
+            v-else-if="decompData && !decompData.success"
+            :description="decompData.message || '数据量不足，无法进行季节性分解'"
+            :image="simpleImage"
+          />
+          <a-empty
+            v-else
+            description="点击「生成分解」按钮查看 STL 季节性分解结果"
+            :image="simpleImage"
+          />
+        </a-spin>
       </a-card>
 
       <!-- 历史评估记录（图表下方） -->
@@ -287,11 +370,168 @@
         <a-empty v-else description="执行预测后将生成 AI 分析报告" :image="simpleImage" />
       </a-spin>
     </a-drawer>
+
+    <!-- 交叉验证抽屉 -->
+    <a-drawer
+      v-model:open="cvDrawerVisible"
+      title="交叉验证"
+      placement="right"
+      width="640"
+    >
+      <!-- 配置区 -->
+      <div class="cv-config">
+        <a-space wrap align="center">
+          <span class="param-label">切分次数 n_splits</span>
+          <a-input-number v-model:value="cvConfig.n_splits" :min="2" :max="10" :precision="0" style="width: 100px" />
+          <span class="param-label">预测步数 horizon</span>
+          <a-input-number v-model:value="cvConfig.horizon" :min="1" :max="12" :precision="0" style="width: 100px" />
+        </a-space>
+        <div style="margin-top: 8px">
+          <span class="param-label" style="margin-right: 8px">切分策略</span>
+          <a-radio-group v-model:value="cvConfig.strategy" button-style="solid">
+            <a-radio-button value="expanding">expanding（扩展窗口）</a-radio-button>
+            <a-radio-button value="sliding">sliding（滑动窗口）</a-radio-button>
+          </a-radio-group>
+        </div>
+        <a-button
+          type="primary"
+          :loading="runningCV"
+          :disabled="!selectedDatasetId"
+          style="margin-top: 12px"
+          @click="onRunCV"
+        >
+          <template #icon><ExperimentOutlined /></template>
+          执行交叉验证
+        </a-button>
+      </div>
+
+      <a-divider style="margin: 16px 0" />
+
+      <!-- 结果展示 -->
+      <a-spin :spinning="runningCV">
+        <div v-if="cvResult">
+          <div class="cv-summary">
+            <span class="meta-item"><b>模型：</b>{{ cvResult.model_name }}</span>
+            <span class="meta-item"><b>策略：</b>{{ cvResult.strategy }}</span>
+            <span class="meta-item"><b>切分次数：</b>{{ cvResult.n_splits }}</span>
+            <span class="meta-item"><b>预测步数：</b>{{ cvResult.horizon }}</span>
+          </div>
+
+          <!-- 各切分 MAE 趋势图 -->
+          <div class="cv-section-title">各切分点 MAE 趋势</div>
+          <div ref="cvChartRef" class="cv-chart-container"></div>
+
+          <!-- 平均指标表格 -->
+          <div class="cv-section-title">平均指标</div>
+          <a-table
+            :columns="cvAvgColumns"
+            :data-source="cvAvgRows"
+            :pagination="false"
+            row-key="name"
+            size="small"
+            class="cv-metrics-table"
+          />
+
+          <!-- 每次切分明细表格 -->
+          <div class="cv-section-title" style="margin-top: 16px">每次切分明细</div>
+          <a-table
+            :columns="cvSplitColumns"
+            :data-source="cvResult.splits"
+            :pagination="false"
+            row-key="split_idx"
+            size="small"
+            class="cv-split-table"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'status'">
+                <a-tag :color="record.status === 'success' ? 'green' : 'red'">
+                  {{ record.status === 'success' ? '成功' : '失败' }}
+                </a-tag>
+              </template>
+            </template>
+          </a-table>
+        </div>
+        <a-empty v-else description="配置参数后点击执行按钮" :image="simpleImage" />
+      </a-spin>
+    </a-drawer>
+
+    <!-- 多模型对比抽屉 -->
+    <a-drawer
+      v-model:open="compareDrawerVisible"
+      title="多模型对比"
+      placement="right"
+      width="720"
+    >
+      <a-space wrap align="center" style="margin-bottom: 12px">
+        <a-button
+          type="primary"
+          :loading="runningCompare"
+          :disabled="!selectedDatasetId"
+          @click="onRunCompare"
+        >
+          <template #icon><BarChartOutlined /></template>
+          执行多模型对比
+        </a-button>
+      </a-space>
+
+      <a-spin :spinning="runningCompare">
+        <div v-if="compareResult">
+          <!-- 自动回测起点提示 -->
+          <a-alert
+            v-if="compareResult.start_index != null"
+            type="info"
+            show-icon
+            style="margin-bottom: 12px"
+            :message="`自动回测起点：${compareResult.start_index}，对照点数：${compareResult.actual_count}`"
+          />
+
+          <!-- 基线参考信息 -->
+          <div class="compare-baselines">
+            <span class="meta-item"><b>Naive MAE：</b>{{ fmtVal(compareResult.baselines?.naive_mae) }}{{ unitText }}</span>
+            <span class="meta-item"><b>SeasonalNaive MAE：</b>{{ fmtVal(compareResult.baselines?.seasonal_naive_mae) }}{{ unitText }}</span>
+          </div>
+
+          <!-- 最优模型提示 -->
+          <a-alert
+            v-if="compareResult.best_model"
+            type="success"
+            show-icon
+            class="best-model-alert"
+            :message="`最优模型：${compareResult.best_model.model_name}（${compareResult.best_model.metric_name}=${compareResult.best_model.metric_value.toFixed(4)}, rMAE=${compareResult.best_model.rmae.toFixed(4)}）`"
+          />
+
+          <!-- 模型对比表格 -->
+          <a-table
+            :columns="compareColumns"
+            :data-source="compareResult.models"
+            :pagination="false"
+            row-key="model_config_id"
+            size="small"
+            class="compare-table"
+            :row-class-name="compareRowClass"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'rmae'">
+                <span :style="{ color: metricVal(record.metrics, 'rmae') < 1 ? '#52c41a' : metricVal(record.metrics, 'rmae') > 1 ? '#f5222d' : 'inherit' }">
+                  {{ metricVal(record.metrics, 'rmae').toFixed(4) }}
+                </span>
+              </template>
+              <template v-if="column.key === 'status'">
+                <a-tag :color="record.status === 'success' ? 'green' : 'red'">
+                  {{ record.status === 'success' ? '成功' : '失败' }}
+                </a-tag>
+              </template>
+            </template>
+          </a-table>
+        </div>
+        <a-empty v-else description="点击执行按钮开始多模型对比" :image="simpleImage" />
+      </a-spin>
+    </a-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import * as echarts from 'echarts'
 import { Empty, message } from 'ant-design-vue'
@@ -301,6 +541,7 @@ import {
   RocketOutlined, ArrowUpOutlined, ArrowDownOutlined, AlertOutlined,
   FileTextOutlined, FieldTimeOutlined,
   VerticalAlignTopOutlined, VerticalAlignBottomOutlined, AimOutlined,
+  ExperimentOutlined, BarChartOutlined,
 } from '@ant-design/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/app'
@@ -311,7 +552,12 @@ import {
   runForecast,
   getTrendAnalysis,
   getForecastTasks,
+  getForecastResultByTask,
   exportForecastResultUrl,
+  runCrossValidation,
+  compareModels,
+  getDecomposition,
+  runStatisticalForecast,
 } from '@/api/forecast'
 import { getModelList, activateModel } from '@/api/model'
 import type {
@@ -320,6 +566,9 @@ import type {
   ForecastTask,
   PaginatedData,
   ModelConfig,
+  CrossValidationResponse,
+  ModelCompareResponse,
+  DecompositionResponse,
 } from '@/types'
 
 const route = useRoute()
@@ -353,6 +602,15 @@ const predictMode = ref<'future' | 'backtest'>('future')
 const startIndex = ref(12)
 const enableAnalysis = ref(true)
 
+// 统计模型预测
+const statModelOptions = [
+  { label: 'ARIMA', value: 'arima' },
+  { label: 'ETS', value: 'ets' },
+  { label: 'Theta', value: 'theta' },
+]
+const selectedStatModel = ref<'arima' | 'ets' | 'theta'>('arima')
+const runningStatForecast = ref(false)
+
 // 趋势数据
 const loadingTrend = ref(false)
 const trendData = ref<TrendAnalysis | null>(null)
@@ -376,6 +634,16 @@ const taskPagination = computed(() => ({
 // 图表
 const chartRef = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
+
+// STL 季节性分解图表
+const decompLoading = ref(false)
+const decompData = ref<DecompositionResponse | null>(null)
+const decompChartRef = ref<HTMLElement | null>(null)
+let decompChart: echarts.ECharts | null = null
+
+// 交叉验证 MAE 图表
+const cvChartRef = ref<HTMLElement | null>(null)
+let cvChart: echarts.ECharts | null = null
 
 // ===== 计算属性 =====
 const hasForecastModel = computed(() => !!selectedModelId.value)
@@ -436,6 +704,156 @@ const backtestActualCount = computed(() => Math.max(0, currentPointCount.value -
 const isBacktest = computed(() => forecastInfo.value?.is_backtest ?? false)
 const hasActuals = computed(() => (forecastInfo.value?.actuals?.length ?? 0) > 0)
 const metricsData = computed(() => forecastInfo.value?.metrics ?? { mae: 0, mape: 0, rmse: 0, max_error: 0 })
+
+// 是否存在扩展指标（MASE / sMAPE / rMAE / baselines 等）
+const hasExtendedMetrics = computed(() => {
+  const m = metricsData.value as any
+  if (!m || typeof m !== 'object') return false
+  return (
+    typeof m.mase === 'number' ||
+    typeof m.smape === 'number' ||
+    typeof m.pinball_loss === 'number' ||
+    typeof m.coverage === 'number' ||
+    typeof m.rmae === 'number' ||
+    (m.baselines && typeof m.baselines === 'object')
+  )
+})
+
+// ===== 交叉验证 =====
+const cvDrawerVisible = ref(false)
+const runningCV = ref(false)
+const cvResult = ref<CrossValidationResponse | null>(null)
+const cvConfig = reactive({
+  n_splits: 5,
+  horizon: 6,
+  strategy: 'expanding' as 'expanding' | 'sliding',
+})
+
+// 交叉验证平均指标表格列
+const cvAvgColumns = [
+  { title: '指标名', dataIndex: 'name', key: 'name' },
+  { title: '平均值', dataIndex: 'avg', key: 'avg', align: 'right' as const },
+  { title: '标准差', dataIndex: 'std', key: 'std', align: 'right' as const },
+]
+
+// 交叉验证平均指标行数据（展平 baselines 等嵌套对象）
+const cvAvgRows = computed(() => {
+  if (!cvResult.value) return []
+  const rows: { name: string; avg: string; std: string }[] = []
+  const avg = cvResult.value.avg_metrics as any
+  const std = cvResult.value.std_metrics as any
+  if (!avg || typeof avg !== 'object') return rows
+  for (const key of Object.keys(avg)) {
+    const v = avg[key]
+    if (typeof v === 'number') {
+      rows.push({
+        name: key,
+        avg: v.toFixed(4),
+        std: typeof std[key] === 'number' ? (std[key] as number).toFixed(4) : '—',
+      })
+    } else if (v && typeof v === 'object') {
+      // 嵌套对象（如 baselines）
+      for (const subKey of Object.keys(v)) {
+        const sv = v[subKey]
+        if (typeof sv === 'number') {
+          rows.push({
+            name: `${key}.${subKey}`,
+            avg: sv.toFixed(4),
+            std: '—',
+          })
+        }
+      }
+    }
+  }
+  return rows
+})
+
+// 交叉验证每次切分明细表格列
+const cvSplitColumns = [
+  { title: '切分序号', dataIndex: 'split_idx', key: 'split_idx', width: 90, align: 'center' as const },
+  { title: '起点', dataIndex: 'start_index', key: 'start_index', width: 80, align: 'right' as const },
+  { title: 'MAE', key: 'mae', width: 90, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'mae').toFixed(4) },
+  { title: 'MAPE', key: 'mape', width: 90, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'mape').toFixed(2) + '%' },
+  { title: 'RMSE', key: 'rmse', width: 90, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'rmse').toFixed(4) },
+  { title: '状态', key: 'status', width: 80, align: 'center' as const },
+  { title: '耗时(ms)', dataIndex: 'duration_ms', key: 'duration_ms', width: 100, align: 'right' as const },
+]
+
+async function onRunCV(): Promise<void> {
+  if (!selectedDatasetId.value) return
+  runningCV.value = true
+  cvResult.value = null
+  try {
+    const res = await runCrossValidation({
+      dataset_id: selectedDatasetId.value,
+      n_splits: cvConfig.n_splits,
+      horizon: cvConfig.horizon,
+      strategy: cvConfig.strategy,
+      skip_analysis: true,
+    })
+    cvResult.value = res
+    await nextTick()
+    renderCVChart()
+  } catch (e: any) {
+    message.error(e.message || '交叉验证失败')
+  } finally {
+    runningCV.value = false
+  }
+}
+
+// ===== 多模型对比 =====
+const compareDrawerVisible = ref(false)
+const runningCompare = ref(false)
+const compareResult = ref<ModelCompareResponse | null>(null)
+
+// 多模型对比表格列
+const compareColumns = [
+  { title: '模型名称', dataIndex: 'model_name', key: 'model_name', width: 140, ellipsis: true },
+  { title: '标识', dataIndex: 'model_identifier', key: 'model_identifier', width: 120, ellipsis: true },
+  { title: 'MAE', key: 'mae', width: 80, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'mae').toFixed(4) },
+  { title: 'MAPE', key: 'mape', width: 80, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'mape').toFixed(2) + '%' },
+  { title: 'RMSE', key: 'rmse', width: 80, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'rmse').toFixed(4) },
+  { title: 'MASE', key: 'mase', width: 80, align: 'right' as const, customRender: ({ record }: any) => metricVal(record.metrics, 'mase').toFixed(4) },
+  { title: 'rMAE', key: 'rmae', width: 80, align: 'right' as const },
+  { title: '耗时(ms)', dataIndex: 'duration_ms', key: 'duration_ms', width: 90, align: 'right' as const },
+  { title: '状态', key: 'status', width: 70, align: 'center' as const },
+]
+
+function compareRowClass(record: any): string {
+  if (!compareResult.value?.best_model) return ''
+  return record.model_name === compareResult.value.best_model.model_name ? 'best-model-row' : ''
+}
+
+async function onRunCompare(): Promise<void> {
+  if (!selectedDatasetId.value) return
+  runningCompare.value = true
+  compareResult.value = null
+  try {
+    const res = await compareModels({
+      dataset_id: selectedDatasetId.value,
+      horizon: horizon.value,
+    })
+    compareResult.value = res
+  } catch (e: any) {
+    message.error(e.message || '多模型对比失败')
+  } finally {
+    runningCompare.value = false
+  }
+}
+
+// ===== 辅助：获取指标值（metrics 可能是 number 或 object） =====
+function metricVal(m: any, key: string): number {
+  if (!m || typeof m !== 'object') return 0
+  const v = m[key]
+  return typeof v === 'number' ? v : 0
+}
+function baselineVal(m: any, key: string): number {
+  if (!m || typeof m !== 'object') return 0
+  const bl = m.baselines
+  if (!bl || typeof bl !== 'object') return 0
+  const v = bl[key]
+  return typeof v === 'number' ? v : 0
+}
 
 // ===== 任务列表列 =====
 const taskColumns = [
@@ -576,11 +994,35 @@ async function onRunForecast(): Promise<void> {
   }
 }
 
-function onViewTask(record: ForecastTask): void {
-  // 切换到该任务的预测结果：重新拉取趋势（最新结果即最近一次成功）
-  // 此处简单刷新；若需查看特定历史任务，可扩展接口
-  if (selectedDatasetId.value) fetchTrend(selectedDatasetId.value)
-  message.info(`已展示数据集最新预测结果（任务 #${record.id}）`)
+async function onViewTask(record: ForecastTask): Promise<void> {
+  // 按 task_id 加载特定历史任务的预测结果，更新图表展示
+  try {
+    message.loading({ content: `正在加载任务 #${record.id} 的结果...`, key: 'viewTask', duration: 0 })
+    const res = await getForecastResultByTask(record.id)
+    if (trendData.value && res.result) {
+      const t = res.task
+      const r = res.result
+      trendData.value.forecast = {
+        forecasts: r.forecasts,
+        quantiles: r.quantiles,
+        future_times: r.future_times,
+        actuals: r.actuals || [],
+        metrics: r.metrics || {},
+        model_name: r.model_name,
+        duration_ms: t.duration_ms,
+        analysis: r.analysis,
+        task_id: t.id,
+        start_index: t.start_index,
+        horizon: t.horizon,
+        is_backtest: t.start_index != null,
+      }
+      await nextTick()
+      renderChart()
+      message.success({ content: `已展示任务 #${record.id} 的预测结果`, key: 'viewTask' })
+    }
+  } catch (e: any) {
+    message.error({ content: e?.message || '加载历史任务失败', key: 'viewTask' })
+  }
 }
 
 function onExportTask(record: ForecastTask, format: 'excel' | 'csv'): void {
@@ -798,6 +1240,185 @@ function renderChart(): void {
 
 function handleResize(): void {
   chart?.resize()
+  decompChart?.resize()
+  cvChart?.resize()
+}
+
+// ===== STL 季节性分解 =====
+async function onGenerateDecomp(): Promise<void> {
+  if (!selectedDatasetId.value) return
+  decompLoading.value = true
+  decompData.value = null
+  try {
+    const res = await getDecomposition(selectedDatasetId.value)
+    decompData.value = res
+    if (res.success) {
+      await nextTick()
+      renderDecompChart()
+    }
+  } catch (e: any) {
+    message.error(e.message || '分解失败')
+  } finally {
+    decompLoading.value = false
+  }
+}
+
+function renderDecompChart(): void {
+  if (!decompChartRef.value || !decompData.value) return
+  if (!decompChart) {
+    decompChart = echarts.init(decompChartRef.value)
+  }
+  const d = decompData.value
+  const times = d.times || []
+  const original = d.original || []
+  const trend = d.trend || []
+  const seasonal = d.seasonal || []
+  const residual = d.residual || []
+
+  // 4 个子图垂直排列，共享 x 轴
+  const gridH = 25
+  const gap = 4
+  const grids: any[] = []
+  const xAxes: any[] = []
+  for (let i = 0; i < 4; i++) {
+    grids.push({
+      left: '8%', right: '3%',
+      top: `${5 + i * (gridH + gap)}%`,
+      height: `${gridH}%`,
+    })
+    xAxes.push({
+      type: 'category',
+      data: times,
+      gridIndex: i,
+      show: i === 3,
+      axisLabel: { fontSize: 10 },
+    })
+  }
+
+  decompChart.setOption({
+    title: [
+      { text: '原始数据', left: 'center', top: '2%', textStyle: { fontSize: 12 } },
+      { text: '趋势分量', left: 'center', top: `${5 + gridH + gap}%`, textStyle: { fontSize: 12 } },
+      { text: '季节分量', left: 'center', top: `${5 + 2 * (gridH + gap)}%`, textStyle: { fontSize: 12 } },
+      { text: '残差分量', left: 'center', top: `${5 + 3 * (gridH + gap)}%`, textStyle: { fontSize: 12 } },
+    ],
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: grids,
+    xAxis: xAxes,
+    yAxis: [
+      { type: 'value', gridIndex: 0, scale: true },
+      { type: 'value', gridIndex: 1, scale: true },
+      { type: 'value', gridIndex: 2, scale: true },
+      { type: 'value', gridIndex: 3, scale: true },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 15 },
+    ],
+    series: [
+      { name: '原始', type: 'line', data: original, xAxisIndex: 0, yAxisIndex: 0, showSymbol: false, lineStyle: { width: 1.5 } },
+      { name: '趋势', type: 'line', data: trend, xAxisIndex: 1, yAxisIndex: 1, showSymbol: false, lineStyle: { width: 2, color: '#fa8c16' } },
+      { name: '季节', type: 'line', data: seasonal, xAxisIndex: 2, yAxisIndex: 2, showSymbol: false, lineStyle: { width: 1.5, color: '#52c41a' } },
+      { name: '残差', type: 'bar', data: residual, xAxisIndex: 3, yAxisIndex: 3, itemStyle: { color: '#bfbfbf' } },
+    ],
+  })
+  decompChart.resize()
+}
+
+// ===== 交叉验证 MAE 图表 =====
+function renderCVChart(): void {
+  if (!cvChartRef.value || !cvResult.value) return
+  if (!cvChart) {
+    cvChart = echarts.init(cvChartRef.value)
+  }
+  const splits = cvResult.value.splits.filter((s) => s.status === 'success')
+  const idxs = splits.map((s) => `切分${s.split_idx + 1}`)
+  const maes = splits.map((s) => {
+    const m = s.metrics as any
+    return typeof m?.mae === 'number' ? m.mae : 0
+  })
+  const naiveMaes = splits.map((s) => {
+    const m = s.metrics as any
+    return m?.baselines?.naive_mae || 0
+  })
+
+  cvChart.setOption({
+    title: { text: '各切分点 MAE 趋势', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['模型MAE', 'Naive基线MAE'], bottom: 0 },
+    grid: { left: '10%', right: '5%', top: '15%', bottom: '15%' },
+    xAxis: { type: 'category', data: idxs },
+    yAxis: { type: 'value', name: 'MAE' },
+    series: [
+      {
+        name: '模型MAE',
+        type: 'line',
+        data: maes,
+        smooth: true,
+        lineStyle: { width: 2, color: '#1890ff' },
+        itemStyle: { color: '#1890ff' },
+        markLine: {
+          data: [{ type: 'average', name: '平均' }],
+          lineStyle: { color: '#1890ff', type: 'dashed' },
+        },
+      },
+      {
+        name: 'Naive基线MAE',
+        type: 'line',
+        data: naiveMaes,
+        smooth: true,
+        lineStyle: { width: 1.5, color: '#fa8c16', type: 'dashed' },
+        itemStyle: { color: '#fa8c16' },
+      },
+    ],
+  })
+  cvChart.resize()
+}
+
+// ===== 统计模型预测 =====
+async function onRunStatForecast(): Promise<void> {
+  if (!selectedDatasetId.value) return
+  runningStatForecast.value = true
+  try {
+    const res = await runStatisticalForecast({
+      dataset_id: selectedDatasetId.value,
+      horizon: horizon.value,
+      model_type: selectedStatModel.value,
+      start_index: predictMode.value === 'backtest' ? startIndex.value : null,
+    })
+    // 用结果更新趋势数据中的预测信息（forecastInfo 为 computed，需更新 trendData）
+    if (trendData.value) {
+      trendData.value = {
+        ...trendData.value,
+        forecast: {
+          forecasts: res.result.forecasts,
+          quantiles: res.result.quantiles,
+          future_times: res.result.future_times,
+          actuals: res.result.actuals || [],
+          metrics: res.result.metrics || {},
+          model_name: res.result.model_name,
+          duration_ms: res.task.duration_ms,
+          analysis: res.result.analysis,
+          task_id: res.task.id,
+          start_index: res.task.start_index,
+          horizon: res.task.horizon,
+          is_backtest: res.task.start_index !== null && res.task.start_index !== undefined,
+        },
+      }
+    }
+    analysisText.value = res.result.analysis || ''
+    // 刷新图表
+    await nextTick()
+    renderChart()
+    // 刷新任务列表
+    if (selectedDatasetId.value) fetchTasks(selectedDatasetId.value)
+    message.success(`${selectedStatModel.value.toUpperCase()} 统计模型预测完成`)
+  } catch (e: any) {
+    message.error(e.message || '统计模型预测失败')
+  } finally {
+    runningStatForecast.value = false
+  }
 }
 
 // ===== 辅助 =====
@@ -832,6 +1453,10 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   chart?.dispose()
   chart = null
+  decompChart?.dispose()
+  decompChart = null
+  cvChart?.dispose()
+  cvChart = null
 })
 </script>
 
@@ -844,6 +1469,18 @@ onUnmounted(() => {
 .chart-container {
   width: 100%;
   height: 420px;
+}
+
+.decomp-chart-container {
+  height: 500px;
+  width: 100%;
+}
+
+.decomp-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 .chart-legend {
@@ -1072,5 +1709,86 @@ onUnmounted(() => {
   font-size: 14px;
   line-height: 1.8;
   color: rgba(0, 0, 0, 0.85);
+}
+
+/* 交叉验证抽屉 */
+.cv-config {
+  margin-bottom: 4px;
+}
+
+.cv-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.65);
+  line-height: 1.8;
+}
+
+.cv-summary .meta-item {
+  white-space: nowrap;
+}
+
+.cv-summary .meta-item b {
+  color: rgba(0, 0, 0, 0.45);
+  font-weight: 500;
+  margin-right: 4px;
+}
+
+.cv-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.75);
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+.cv-chart-container {
+  height: 280px;
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.cv-metrics-table,
+.compare-table {
+  margin-top: 12px;
+}
+
+.cv-split-table {
+  margin-top: 16px;
+}
+
+.best-model-alert {
+  margin-bottom: 12px;
+}
+
+/* 多模型对比 */
+.compare-baselines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.65);
+  line-height: 1.8;
+  margin-bottom: 12px;
+}
+
+.compare-baselines .meta-item {
+  white-space: nowrap;
+}
+
+.compare-baselines .meta-item b {
+  color: rgba(0, 0, 0, 0.45);
+  font-weight: 500;
+  margin-right: 4px;
+}
+
+/* 最优模型行高亮 */
+:deep(.best-model-row) {
+  background-color: #f6ffed;
+}
+
+:deep(.best-model-row:hover > td) {
+  background-color: #d9f7be !important;
 }
 </style>

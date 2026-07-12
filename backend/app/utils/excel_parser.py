@@ -5,8 +5,11 @@ Excel 基于 openpyxl，无需 pandas；CSV 基于标准库 csv。
 """
 import csv
 import io
+import logging
 from datetime import datetime
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill
@@ -285,7 +288,7 @@ def _to_time_str(val, fallback_idx: int) -> str:
         try:
             return val.strftime("%Y-%m-%d")
         except Exception:
-            pass
+            logger.debug(f"[excel_parser] strftime 失败 val={val!r}")
     return str(val).strip()
 
 

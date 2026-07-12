@@ -42,7 +42,15 @@
               </template>
               <span v-else class="meta-empty">无标签</span>
               <a-divider type="vertical" />
-              <span class="meta-text">类型：{{ contentTypeText(data.content_type) }}</span>
+              <span class="meta-text">
+                类型：{{ contentTypeText(data.content_type) }}
+                <a-tag v-if="data.vector_indexed === true" color="success" style="margin-left: 8px; font-size: 12px">
+                  已索引
+                </a-tag>
+                <a-tag v-else-if="data.vector_indexed === false" color="warning" style="margin-left: 8px; font-size: 12px">
+                  未索引
+                </a-tag>
+              </span>
               <a-divider type="vertical" />
               <span class="meta-text">创建于 {{ formatTime(data.created_at) }}</span>
               <span class="meta-text" v-if="data.updated_at !== data.created_at">
@@ -74,7 +82,7 @@
           <!-- 内容 -->
           <div class="detail-content">
             <MarkdownView v-if="data.content_type === 'markdown'" :content="data.content" />
-            <div v-else-if="data.content_type === 'html'" v-html="data.content"></div>
+            <div v-else-if="data.content_type === 'html'" v-html="sanitizedHtml"></div>
             <pre v-else class="plain-text">{{ data.content }}</pre>
           </div>
         </a-card>
@@ -113,7 +121,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   EditOutlined,
@@ -124,11 +132,24 @@ import {
 import { message } from 'ant-design-vue'
 import dayjs from 'dayjs'
 import MarkdownView from '@/components/MarkdownView.vue'
+import DOMPurify from 'dompurify'
 import { getKnowledgeDetail, getRelatedKnowledge, getDownloadUrl, deleteKnowledge } from '@/api/knowledge'
 import type { Knowledge } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
+
+// XSS 防护：对 HTML 类型内容进行 DOMPurify 过滤后再渲染
+const sanitizedHtml = computed(() => {
+  if (!data.value || data.value.content_type !== 'html') return ''
+  return DOMPurify.sanitize(data.value.content, {
+    ALLOWED_TAGS: ['p', 'br', 'b', 'i', 'u', 's', 'strong', 'em', 'a', 'ul', 'ol', 'li',
+      'table', 'thead', 'tbody', 'tr', 'td', 'th', 'img', 'div', 'span', 'h1', 'h2',
+      'h3', 'h4', 'h5', 'h6', 'blockquote', 'code', 'pre', 'hr'],
+    ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'width', 'height', 'style', 'class'],
+    ALLOW_DATA_ATTR: false,
+  })
+})
 
 const loading = ref(false)
 const relatedLoading = ref(false)

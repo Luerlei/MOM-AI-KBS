@@ -6,8 +6,9 @@ from app.database import get_db
 from app.schemas.skill_option import SkillOptionCreate, SkillOptionUpdate
 from app.services import skill_option_service
 from app.utils.response import success
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("")

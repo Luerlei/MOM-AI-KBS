@@ -2,17 +2,18 @@
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.config import UPLOAD_PATH
+from app.config import BASE_DIR
 from app.schemas.knowledge import KnowledgeCreate, KnowledgeUpdate, BatchOperation
 from app.services import knowledge_service
 from app.utils.response import success, page_result, APIError
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("")
@@ -42,7 +43,7 @@ def list_knowledge(
 def get_knowledge(kid: int, db: Session = Depends(get_db)):
     """知识详情"""
     k = knowledge_service.get_by_id(db, kid)
-    out = knowledge_service._to_out(k)
+    out = knowledge_service._to_out(k, include_index_status=True)
     out["documents"] = [
         {"id": d.id, "filename": d.filename, "file_type": d.file_type, "file_size": d.file_size}
         for d in k.documents
@@ -51,16 +52,16 @@ def get_knowledge(kid: int, db: Session = Depends(get_db)):
 
 
 @router.post("")
-def create_knowledge(data: KnowledgeCreate, db: Session = Depends(get_db)):
+async def create_knowledge(data: KnowledgeCreate, db: Session = Depends(get_db)):
     """创建知识"""
-    k = knowledge_service.create(db, data)
+    k = await knowledge_service.create(db, data)
     return success(knowledge_service._to_out(k), message="创建成功")
 
 
 @router.put("/{kid}")
-def update_knowledge(kid: int, data: KnowledgeUpdate, db: Session = Depends(get_db)):
+async def update_knowledge(kid: int, data: KnowledgeUpdate, db: Session = Depends(get_db)):
     """更新知识"""
-    k = knowledge_service.update(db, kid, data)
+    k = await knowledge_service.update(db, kid, data)
     return success(knowledge_service._to_out(k), message="更新成功")
 
 
@@ -72,11 +73,29 @@ def delete_knowledge(kid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
-    """批量上传文件"""
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    category_id: Optional[int] = Form(None),
+    tag_ids: str = Form(""),
+    auto_tag: bool = Form(False),
+    db: Session = Depends(get_db),
+):
+    """批量上传文件
+
+    Args:
+        category_id: 可选，指定分类
+        tag_ids: 逗号分隔的标签 ID 列表
+        auto_tag: 是否自动打标签（LLM 分析内容）
+    """
     if not files:
         raise APIError("请选择要上传的文件")
-    created = knowledge_service.upload_files(db, files)
+    # 解析 tag_ids
+    tid_list = []
+    if tag_ids:
+        tid_list = [int(x.strip()) for x in tag_ids.split(",") if x.strip()]
+    created = await knowledge_service.upload_files(
+        db, files, category_id=category_id, tag_ids=tid_list, auto_tag=auto_tag
+    )
     return success([knowledge_service._to_out(k) for k in created], message=f"成功上传 {len(created)} 个文件")
 
 
@@ -95,9 +114,9 @@ def get_related(kid: int, limit: int = 5, db: Session = Depends(get_db)):
 
 
 @router.post("/rebuild-indexes")
-def rebuild_indexes(db: Session = Depends(get_db)):
+async def rebuild_indexes(db: Session = Depends(get_db)):
     """重建所有知识的向量索引（切换 Embedding 模型后调用）"""
-    result = knowledge_service.rebuild_all_indexes(db)
+    result = await knowledge_service.rebuild_all_indexes(db)
     return success(result, message=f"重建完成: 成功 {result['success']}/{result['total']}")
 
 
@@ -110,7 +129,12 @@ def download_document(kid: int, doc_id: int, db: Session = Depends(get_db)):
         raise APIError("附件不存在", status_code=404)
     file_path = doc.file_path
     if not os.path.isabs(file_path):
-        file_path = os.path.join(UPLOAD_PATH, file_path)
+        # file_path 可能是 "data\uploads\filename" 或仅 "filename"
+        if file_path.startswith("data") or file_path.startswith("uploads"):
+            file_path = os.path.join(str(BASE_DIR), file_path)
+        else:
+            from app.config import UPLOAD_PATH
+            file_path = os.path.join(UPLOAD_PATH, file_path)
     if not os.path.exists(file_path):
         raise APIError("文件不存在或已删除", status_code=404)
     return FileResponse(

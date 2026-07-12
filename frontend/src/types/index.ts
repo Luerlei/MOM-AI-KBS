@@ -179,14 +179,23 @@ export interface SkillTemplate {
 }
 
 /**
+ * Skill 测试各 Skill 得分明细
+ */
+export interface SkillTestScore {
+  skill_id: number
+  skill_name: string
+  keyword_hits: number
+  semantic_score: number
+}
+
+/**
  * Skill 测试结果
  */
 export interface SkillTestResult {
-  matched: boolean
-  skill_id?: number
-  skill_name?: string
-  confidence?: number
-  reason?: string
+  matched_skill: Skill | null
+  match_type: string  // keyword / semantic / default
+  score: number
+  all_scores: SkillTestScore[]
 }
 
 /**
@@ -205,6 +214,8 @@ export interface ModelConfig {
   api_key_masked: string
   model_name: string
   is_active: boolean
+  input_price: number
+  output_price: number
   created_at: string
   updated_at: string
 }
@@ -267,6 +278,7 @@ export interface QAReference {
  */
 export interface SearchResult {
   id: number
+  knowledge_id: number
   title: string
   content: string
   snippet: string
@@ -274,6 +286,7 @@ export interface SearchResult {
   category_id?: number
   category_name?: string
   tags?: Tag[]
+  tag_names?: string[]
   score?: number
   created_at?: string
 }
@@ -323,7 +336,25 @@ export interface CacheStats {
 }
 
 /**
- * Token 统计完整汇总（包含趋势、分布、缓存）
+ * 单模型成本估算明细
+ */
+export interface CostEstimateItem {
+  model_name: string
+  input_tokens: number
+  output_tokens: number
+  cost: number
+}
+
+/**
+ * Token 成本估算
+ */
+export interface CostEstimate {
+  total_cost: number
+  by_model: CostEstimateItem[]
+}
+
+/**
+ * Token 统计完整汇总（包含趋势、分布、缓存、成本）
  */
 export interface TokenStatsSummary {
   total_tokens: number
@@ -334,6 +365,7 @@ export interface TokenStatsSummary {
   by_skill: TokenDimensionStat[]
   by_call_type: TokenDimensionStat[]
   cache_stats: CacheStats
+  cost_estimate?: CostEstimate
 }
 
 /**
@@ -568,6 +600,107 @@ export interface ForecastPredictRequest {
 export interface ForecastPredictResponse {
   task: ForecastTask
   result: ForecastResult
+}
+
+/**
+ * 交叉验证请求
+ */
+export interface CrossValidationRequest {
+  dataset_id: number
+  n_splits?: number
+  horizon?: number
+  strategy?: 'expanding' | 'sliding'
+  skip_analysis?: boolean
+}
+
+/**
+ * 交叉验证单次切分结果
+ */
+export interface CVSplitResult {
+  split_idx: number
+  start_index: number
+  metrics: Record<string, number | object>
+  duration_ms: number
+  status: 'success' | 'failed'
+  error?: string
+}
+
+/**
+ * 交叉验证响应
+ */
+export interface CrossValidationResponse {
+  splits: CVSplitResult[]
+  avg_metrics: Record<string, number | object>
+  std_metrics: Record<string, number | object>
+  model_name: string
+  strategy: string
+  n_splits: number
+  horizon: number
+}
+
+/**
+ * 多模型对比单模型结果
+ */
+export interface ModelCompareItem {
+  model_name: string
+  model_config_id: number
+  model_identifier: string
+  metrics: Record<string, number | object>
+  duration_ms: number
+  status: 'success' | 'failed'
+  error?: string
+}
+
+/**
+ * 多模型对比响应
+ */
+export interface ModelCompareResponse {
+  models: ModelCompareItem[]
+  best_model: {
+    model_name: string
+    metric_name: string
+    metric_value: number
+    rmae: number
+  } | null
+  baselines: {
+    naive_mae: number
+    seasonal_naive_mae: number
+    naive_forecasts: number[]
+    seasonal_naive_forecasts: number[]
+  }
+  start_index: number
+  actual_count: number
+  horizon: number
+}
+
+/**
+ * STL 季节性分解响应
+ */
+export interface DecompositionResponse {
+  success: boolean
+  message?: string
+  times?: string[]
+  original?: number[]
+  trend?: number[]
+  seasonal?: number[]
+  residual?: number[]
+  seasonal_strength?: number
+  seasonal_amplitude?: number
+  frequency?: string
+  preprocess?: {
+    missing_filled: number
+    outliers_fixed: number
+  }
+}
+
+/**
+ * 统计模型预测请求
+ */
+export interface StatisticalForecastRequest {
+  dataset_id: number
+  horizon: number
+  model_type: 'arima' | 'ets' | 'theta'
+  start_index?: number | null
 }
 
 /**

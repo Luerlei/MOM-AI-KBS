@@ -16,7 +16,13 @@
         <span>{{ isEdit ? '编辑 Skill' : '新建 Skill' }}</span>
       </template>
       <template #extra>
-        <a-button @click="$router.back()">返回</a-button>
+        <a-space>
+          <a-button @click="$router.back()">返回</a-button>
+          <a-button @click="$router.back()">取消</a-button>
+          <a-button type="primary" :loading="saving" @click="handleSave">
+            {{ isEdit ? '保存' : '创建' }}
+          </a-button>
+        </a-space>
       </template>
 
       <a-form ref="formRef" :model="form" :rules="rules" layout="vertical">
@@ -178,32 +184,37 @@
           </a-input-group>
           <div v-if="testResult" class="test-result">
             <a-alert
-              :message="testResult.matched ? '匹配成功' : '未匹配'"
-              :type="testResult.matched ? 'success' : 'warning'"
+              :message="testResult.match_type !== 'default' ? '匹配成功' : '未匹配（使用默认 Skill）'"
+              :type="testResult.match_type !== 'default' ? 'success' : 'warning'"
               show-icon
             >
               <template #description>
-                <div v-if="testResult.matched">
-                  <div>匹配 Skill：{{ testResult.skill_name || form.name }}</div>
-                  <div v-if="testResult.confidence">
-                    置信度：{{ (testResult.confidence * 100).toFixed(1) }}%
-                  </div>
-                  <div v-if="testResult.reason">{{ testResult.reason }}</div>
+                <div>
+                  <div>匹配 Skill：{{ testResult.matched_skill?.name || '未知' }}</div>
+                  <div>匹配方式：{{ matchTypeLabel(testResult.match_type) }}</div>
+                  <div v-if="testResult.score > 0">得分：{{ testResult.score.toFixed(3) }}</div>
                 </div>
-                <div v-else>没有匹配到该 Skill。</div>
               </template>
             </a-alert>
+            <a-table
+              v-if="testResult.all_scores && testResult.all_scores.length > 0"
+              :data-source="testResult.all_scores"
+              :columns="testScoreColumns"
+              :pagination="false"
+              size="small"
+              row-key="skill_id"
+              style="margin-top: 12px"
+            >
+              <template #bodyCell="{ column, record }">
+                <template v-if="column.key === 'skill_name'">
+                  <span :style="{ fontWeight: record.skill_id === testResult.matched_skill?.id ? 'bold' : 'normal' }">
+                    {{ record.skill_name }}
+                  </span>
+                </template>
+              </template>
+            </a-table>
           </div>
         </a-card>
-
-        <div class="form-actions">
-          <a-space>
-            <a-button @click="$router.back()">取消</a-button>
-            <a-button type="primary" :loading="saving" @click="handleSave">
-              {{ isEdit ? '保存' : '创建' }}
-            </a-button>
-          </a-space>
-        </div>
       </a-form>
     </a-card>
 
@@ -308,6 +319,22 @@ async function loadFunctionOptions(): Promise<void> {
 const testQuestion = ref('')
 const testLoading = ref(false)
 const testResult = ref<SkillTestResult | null>(null)
+
+const testScoreColumns = [
+  { title: 'Skill', dataIndex: 'skill_name', key: 'skill_name' },
+  { title: '关键词命中', dataIndex: 'keyword_hits', key: 'keyword_hits', width: 100 },
+  { title: '语义得分', dataIndex: 'semantic_score', key: 'semantic_score', width: 100,
+    customRender: ({ text }: { text: number }) => text > 0 ? text.toFixed(3) : '-' },
+]
+
+function matchTypeLabel(type: string): string {
+  switch (type) {
+    case 'keyword': return '关键词匹配'
+    case 'semantic': return '语义匹配'
+    case 'default': return '默认兜底'
+    default: return type
+  }
+}
 
 async function runTest(): Promise<void> {
   if (!testQuestion.value.trim()) {
@@ -424,14 +451,6 @@ onMounted(() => {
   margin-bottom: 8px;
   font-size: 13px;
   color: rgba(0, 0, 0, 0.65);
-}
-
-.form-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 16px;
-  margin-top: 16px;
-  border-top: 1px solid #f0f0f0;
 }
 
 .test-result {

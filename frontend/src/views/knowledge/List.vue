@@ -4,30 +4,43 @@
       <!-- 左侧筛选 -->
       <a-col :xs="24" :md="6" :lg="5">
         <a-card title="筛选" size="small" class="filter-card">
-          <!-- 分类树 -->
+          <!-- 分类 -->
           <div class="filter-section">
-            <div class="section-title">分类</div>
+            <div class="section-title-row">
+              <span class="section-title">分类</span>
+            </div>
             <CategoryTree
               :categories="categories"
               :selected-id="query.category_id"
               :loading="categoryLoading"
               @select="onCategorySelect"
+              @refresh="fetchCategories"
             />
           </div>
           <a-divider style="margin: 12px 0" />
-          <!-- 标签列表 -->
+          <!-- 标签 -->
           <div class="filter-section">
-            <div class="section-title">标签</div>
+            <div class="section-title-row">
+              <span class="section-title">标签</span>
+            </div>
             <a-spin :spinning="tagLoading">
-              <div class="tag-list">
-                <a-checkable-tag
+              <div class="tag-radio-group">
+                <label
+                  class="tag-radio-item"
+                  :class="{ 'tag-radio-active': !query.tag_ids?.length }"
+                  @click="clearTags"
+                >
+                  <span>全部</span>
+                </label>
+                <label
                   v-for="tag in tags"
                   :key="tag.id"
-                  :checked="query.tag_ids?.includes(tag.id)"
-                  @change="onTagToggle(tag.id)"
+                  class="tag-radio-item"
+                  :class="{ 'tag-radio-active': query.tag_ids?.includes(tag.id) }"
+                  @click="onTagToggle(tag.id)"
                 >
-                  {{ tag.name }}
-                </a-checkable-tag>
+                  <span>{{ tag.name }}</span>
+                </label>
               </div>
               <a-empty v-if="!tagLoading && tags.length === 0" :image="simpleImage" />
             </a-spin>
@@ -77,7 +90,6 @@
             :loading="loading"
             :pagination="pagination"
             :row-selection="{ selectedRowKeys, onChange: onSelectChange }"
-            :expandable="{ expandedRowRender, expandedRowKeys: expandedKeys, onExpand: onExpand }"
             :scroll="{ x: 1100 }"
             row-key="id"
             size="middle"
@@ -107,25 +119,12 @@
               </template>
               <template v-else-if="column.key === 'action'">
                 <a-space>
-                  <a-button type="link" size="small" @click="togglePreview(record)">
-                    {{ expandedKeys.includes(record.id) ? '收起' : '预览' }}
-                  </a-button>
                   <a-button type="link" size="small" @click="goEdit(record.id)">编辑</a-button>
                   <a-popconfirm title="确定删除该知识条目?" @confirm="handleDelete(record.id)">
                     <a-button type="link" size="small" danger>删除</a-button>
                   </a-popconfirm>
                 </a-space>
               </template>
-            </template>
-
-            <!-- 展开行：内容预览 -->
-            <template #expandedRowRender="{ record }">
-              <div class="content-preview">
-                <div class="preview-label">内容摘要：</div>
-                <div class="preview-text">
-                  {{ truncateText(stripMarkdown(record.content), 200) }}
-                </div>
-              </div>
             </template>
           </a-table>
         </a-card>
@@ -202,7 +201,6 @@ const tableData = ref<Knowledge[]>([])
 const categories = ref<Category[]>([])
 const tags = ref<Tag[]>([])
 const selectedRowKeys = ref<number[]>([])
-const expandedKeys = ref<number[]>([])
 
 const query = ref<KnowledgeQuery>({
   page: 1,
@@ -237,32 +235,6 @@ const batchCategoryVisible = ref(false)
 const batchTagIds = ref<number[]>([])
 const batchCategoryId = ref<number | null>(null)
 
-function expandedRowRender(): void {
-  // 由 template #expandedRowRender 提供
-}
-
-function togglePreview(record: Knowledge): void {
-  const idx = expandedKeys.value.indexOf(record.id)
-  if (idx >= 0) {
-    expandedKeys.value.splice(idx, 1)
-  } else {
-    expandedKeys.value.push(record.id)
-  }
-}
-
-function onExpand(expanded: boolean, record: Knowledge): void {
-  if (expanded) {
-    if (!expandedKeys.value.includes(record.id)) {
-      expandedKeys.value.push(record.id)
-    }
-  } else {
-    const idx = expandedKeys.value.indexOf(record.id)
-    if (idx >= 0) {
-      expandedKeys.value.splice(idx, 1)
-    }
-  }
-}
-
 function onCategorySelect(categoryId: number | null): void {
   query.value.category_id = categoryId || undefined
   query.value.page = 1
@@ -277,6 +249,12 @@ function onTagToggle(tagId: number): void {
   } else {
     query.value.tag_ids.push(tagId)
   }
+  query.value.page = 1
+  fetchData()
+}
+
+function clearTags(): void {
+  query.value.tag_ids = []
   query.value.page = 1
   fetchData()
 }
@@ -438,19 +416,6 @@ function batchDelete(): void {
   })
 }
 
-function truncateText(text: string, max: number): string {
-  if (!text) return ''
-  return text.length > max ? text.slice(0, max) + '...' : text
-}
-
-function stripMarkdown(text: string): string {
-  if (!text) return ''
-  return text
-    .replace(/[#*`_\-\[\]()>~]/g, '')
-    .replace(/\n+/g, ' ')
-    .trim()
-}
-
 function contentTypeText(type: string): string {
   const map: Record<string, string> = {
     markdown: 'Markdown',
@@ -489,16 +454,51 @@ onMounted(() => {
   margin-bottom: 16px;
 }
 
-.section-title {
-  font-weight: 600;
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 8px;
-  color: rgba(0, 0, 0, 0.85);
 }
 
-.tag-list {
+.section-title {
+  font-weight: 600;
+}
+
+.tag-radio-group {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 4px;
+}
+
+.tag-radio-item {
+  display: block;
+  width: 100%;
+  padding: 0 15px;
+  height: 32px;
+  line-height: 30px;
+  font-size: 14px;
+  text-align: left;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.tag-radio-item:hover {
+  color: #1677ff;
+  border-color: #1677ff;
+}
+
+.tag-radio-active {
+  color: #fff;
+  background: #1677ff;
+  border-color: #1677ff;
+}
+
+.tag-radio-active:hover {
+  color: #fff;
 }
 
 .toolbar {
@@ -524,22 +524,6 @@ onMounted(() => {
 
 .text-muted {
   color: rgba(0, 0, 0, 0.45);
-}
-
-.content-preview {
-  padding: 8px 16px;
-  background: #fafafa;
-}
-
-.preview-label {
-  font-weight: 600;
-  margin-bottom: 4px;
-  color: rgba(0, 0, 0, 0.65);
-}
-
-.preview-text {
-  color: rgba(0, 0, 0, 0.65);
-  line-height: 1.6;
 }
 
 @media (max-width: 768px) {

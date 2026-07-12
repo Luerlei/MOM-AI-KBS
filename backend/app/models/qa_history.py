@@ -18,4 +18,5 @@ class QAHistory(Base):
     token_input = Column(Integer, default=0, comment="输入token")
     token_output = Column(Integer, default=0, comment="输出token")
     duration_ms = Column(Integer, default=0, comment="耗时毫秒")
+    is_cache_hit = Column(Integer, default=0, comment="N10: 是否缓存命中: 0=否, 1=是")
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())

@@ -153,23 +153,35 @@
       <div v-if="testResult" class="test-result">
         <a-divider />
         <a-alert
-          :message="testResult.matched ? '匹配成功' : '未匹配'"
-          :type="testResult.matched ? 'success' : 'warning'"
+          :message="testResult.match_type !== 'default' ? '匹配成功' : '未匹配（使用默认 Skill）'"
+          :type="testResult.match_type !== 'default' ? 'success' : 'warning'"
           show-icon
         >
           <template #description>
-            <div v-if="testResult.matched">
-              <div>匹配 Skill：{{ testResult.skill_name }}</div>
-              <div v-if="testResult.confidence">
-                置信度：{{ (testResult.confidence * 100).toFixed(1) }}%
-              </div>
-              <div v-if="testResult.reason">{{ testResult.reason }}</div>
-            </div>
-            <div v-else>
-              没有匹配到合适的 Skill，将使用默认路由。
+            <div>
+              <div>匹配 Skill：{{ testResult.matched_skill?.name || '未知' }}</div>
+              <div>匹配方式：{{ matchTypeLabel(testResult.match_type) }}</div>
+              <div v-if="testResult.score > 0">得分：{{ testResult.score.toFixed(3) }}</div>
             </div>
           </template>
         </a-alert>
+        <a-table
+          v-if="testResult.all_scores && testResult.all_scores.length > 0"
+          :data-source="testResult.all_scores"
+          :columns="testScoreColumns"
+          :pagination="false"
+          size="small"
+          row-key="skill_id"
+          style="margin-top: 12px"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'skill_name'">
+              <span :style="{ fontWeight: record.skill_id === testResult.matched_skill?.id ? 'bold' : 'normal' }">
+                {{ record.skill_name }}
+              </span>
+            </template>
+          </template>
+        </a-table>
       </div>
     </a-modal>
 
@@ -359,6 +371,22 @@ const testQuestion = ref('')
 const testLoading = ref(false)
 const testResult = ref<SkillTestResult | null>(null)
 const currentSkillId = ref<number | null>(null)
+
+const testScoreColumns = [
+  { title: 'Skill', dataIndex: 'skill_name', key: 'skill_name' },
+  { title: '关键词命中', dataIndex: 'keyword_hits', key: 'keyword_hits', width: 100 },
+  { title: '语义得分', dataIndex: 'semantic_score', key: 'semantic_score', width: 100,
+    customRender: ({ text }: { text: number }) => text > 0 ? text.toFixed(3) : '-' },
+]
+
+function matchTypeLabel(type: string): string {
+  switch (type) {
+    case 'keyword': return '关键词匹配'
+    case 'semantic': return '语义匹配'
+    case 'default': return '默认兜底'
+    default: return type
+  }
+}
 
 function openTestModal(record: Skill): void {
   currentSkillId.value = record.id

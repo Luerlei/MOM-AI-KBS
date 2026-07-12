@@ -17,6 +17,8 @@ def _to_out(config: ModelConfig) -> dict:
         "api_key_masked": mask(decrypt(config.api_key)),
         "model_name": config.model_name,
         "is_active": config.is_active,
+        "input_price": config.input_price or 0.0,
+        "output_price": config.output_price or 0.0,
         "created_at": config.created_at,
         "updated_at": config.updated_at,
     }
@@ -47,6 +49,8 @@ def create(db, data: ModelConfigCreate) -> ModelConfig:
         api_key=encrypt(data.api_key) if data.api_key else "",
         model_name=data.model_name,
         is_active=False,
+        input_price=data.input_price,
+        output_price=data.output_price,
     )
     db.add(config)
     db.commit()
@@ -69,11 +73,18 @@ def update(db, id: int, data: ModelConfigUpdate) -> ModelConfig:
         config.api_key = encrypt(data.api_key) if data.api_key else ""
     if data.model_name is not None:
         config.model_name = data.model_name
+    if data.input_price is not None:
+        config.input_price = data.input_price
+    if data.output_price is not None:
+        config.output_price = data.output_price
     db.commit()
     db.refresh(config)
     if data.is_active:
         activate(db, config.id)
         db.refresh(config)
+    # 失效缓存（配置变更后旧客户端不再有效）
+    from app.services.llm_client import model_manager
+    model_manager.invalidate_cache(config.type)
     return config
 
 
@@ -95,6 +106,9 @@ def activate(db, id: int):
     config.is_active = True
     db.commit()
     db.refresh(config)
+    # 失效缓存（启用的配置变更）
+    from app.services.llm_client import model_manager
+    model_manager.invalidate_cache(config.type)
     return config
 
 
@@ -128,20 +142,37 @@ async def test_connection(db, id: int) -> ModelTestResult:
         # LLM / Embedding 走 OpenAI 兼容客户端
         client = OpenAICompatibleClient(config)
         if config.type == "LLM":
-            result = await client.chat([{"role": "user", "content": "ping"}])
-            latency = int((time.time() - start) * 1000)
-            usage = getattr(client, "last_usage", {}) or {}
-            _log_test_usage(
-                db, config,
-                input_tokens=usage.get("input_tokens", 0),
-                output_tokens=usage.get("output_tokens", 0),
-                latency_ms=latency,
-            )
-            return ModelTestResult(
-                success=True,
-                message=f"连接成功，模型: {result.get('model', config.model_name)}",
-                latency_ms=latency,
-            )
+            # 流式请求测试连通性：收到 HTTP 200 响应头即确认
+            # 思考模型（如 DeepSeek-V4-Flash）非流式需 >120s 会超时，流式只检查响应头
+            import httpx as _httpx
+            from app.services.llm_client import _build_ssl_context
+            async with _httpx.AsyncClient(timeout=120.0, verify=_build_ssl_context(), trust_env=False) as _http:
+                async with _http.stream(
+                    "POST",
+                    f"{client.api_url}/chat/completions",
+                    headers=client._headers(),
+                    json={
+                        "model": config.model_name,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": True,
+                        "max_tokens": 5,
+                    },
+                ) as resp:
+                    latency = int((time.time() - start) * 1000)
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        _log_test_usage(db, config, 0, 0, latency_ms=latency, success=False)
+                        return ModelTestResult(
+                            success=False,
+                            message=f"连接失败({resp.status_code}): {body.decode('utf-8', errors='replace')[:200]}",
+                            latency_ms=latency,
+                        )
+                    _log_test_usage(db, config, 0, 0, latency_ms=latency)
+                    return ModelTestResult(
+                        success=True,
+                        message=f"连接成功，模型: {config.model_name}",
+                        latency_ms=latency,
+                    )
         else:  # Embedding
             vec = await client.embedding(["ping"])
             latency = int((time.time() - start) * 1000)

@@ -61,6 +61,10 @@
                   <SettingOutlined />
                   <span style="margin-left: 8px">系统设置</span>
                 </a-menu-item>
+                <a-menu-item key="logout" @click="handleLogout">
+                  <LogoutOutlined />
+                  <span style="margin-left: 8px">退出登录</span>
+                </a-menu-item>
               </a-menu>
             </template>
           </a-dropdown>
@@ -130,7 +134,8 @@ import {
   DashboardOutlined,
   FileSearchOutlined,
   LineChartOutlined,
-  DatabaseOutlined
+  DatabaseOutlined,
+  LogoutOutlined
 } from '@ant-design/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/app'
@@ -302,6 +307,14 @@ function onGlobalSearch(): void {
 
 function goSettings(): void {
   router.push('/models')
+}
+
+function handleLogout(): void {
+  localStorage.removeItem('token')
+  localStorage.removeItem('username')
+  // 重置认证缓存，使下次访问时重新检查后端认证状态
+  import('@/router').then(({ resetAuthCache }) => resetAuthCache())
+  router.replace('/login')
 }
 
 function goToModelConfig(): void {

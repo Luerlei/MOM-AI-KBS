@@ -6,8 +6,9 @@ from app.database import get_db
 from app.schemas.skill import SkillCreate, SkillUpdate, SkillTestRequest
 from app.services import skill_service, skill_router
 from app.utils.response import success, APIError
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("")
@@ -76,11 +77,11 @@ def toggle_skill(sid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{sid}/test")
-def test_skill(sid: int, data: SkillTestRequest, db: Session = Depends(get_db)):
+async def test_skill(sid: int, data: SkillTestRequest, db: Session = Depends(get_db)):
     """测试 Skill 路由"""
     # 确认 Skill 存在
     skill_service.get_by_id(db, sid)
-    result = skill_router.test_route(data.question, db)
+    result = await skill_router.test_route(data.question, db)
     return success({
         "matched_skill": result.matched_skill,
         "match_type": result.match_type,

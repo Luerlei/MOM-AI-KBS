@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import TokenUsage, QAHistory
 from app.utils.response import success, page_result, APIError
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.get("")
@@ -39,12 +40,24 @@ def token_stats(
     if model_name:
         q = q.filter(TokenUsage.model_name == model_name)
 
-    records = q.all()
+    # 使用 SQL 聚合替代 Python 循环
+    from app.models import Skill
 
-    total_input = sum(r.input_tokens for r in records)
-    total_output = sum(r.output_tokens for r in records)
+    # 总计：SQL 聚合
+    total_agg = db.query(
+        func.sum(TokenUsage.input_tokens).label("total_input"),
+        func.sum(TokenUsage.output_tokens).label("total_output"),
+        func.count(TokenUsage.id).label("call_count"),
+    ).filter(TokenUsage.created_at >= start_str)
+    if skill_id:
+        total_agg = total_agg.filter(TokenUsage.skill_id == skill_id)
+    if model_name:
+        total_agg = total_agg.filter(TokenUsage.model_name == model_name)
+    agg_row = total_agg.one()
+    total_input = int(agg_row.total_input or 0)
+    total_output = int(agg_row.total_output or 0)
     total_tokens = total_input + total_output
-    call_count = len(records)
+    call_count = int(agg_row.call_count or 0)
 
     # 缓存命中率统计：缓存命中 = QAHistory中token_input=0且token_output=0的记录
     qa_q = db.query(QAHistory).filter(QAHistory.created_at >= start_str)
@@ -60,50 +73,83 @@ def token_stats(
     avg_tokens = total_tokens // call_count if call_count > 0 else 0
     tokens_saved = cache_hits * avg_tokens
 
-    # 趋势数据（按天分组）
-    trend = {}
-    for r in records:
-        try:
-            day = r.created_at[:10] if r.created_at else "unknown"
-        except Exception:
-            day = "unknown"
-        if day not in trend:
-            trend[day] = {"date": day, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
-        trend[day]["input_tokens"] += r.input_tokens
-        trend[day]["output_tokens"] += r.output_tokens
-        trend[day]["total_tokens"] += r.input_tokens + r.output_tokens
-        trend[day]["calls"] += 1
-    trend_list = sorted(trend.values(), key=lambda x: x["date"])
+    # 趋势数据：SQL 按天分组聚合（created_at 是字符串 ISO 格式，取前 10 位为日期）
+    day_expr = func.substr(TokenUsage.created_at, 1, 10)
+    trend_q = db.query(
+        day_expr.label("day"),
+        func.sum(TokenUsage.input_tokens).label("input_tokens"),
+        func.sum(TokenUsage.output_tokens).label("output_tokens"),
+        func.count(TokenUsage.id).label("calls"),
+    ).filter(TokenUsage.created_at >= start_str)
+    if skill_id:
+        trend_q = trend_q.filter(TokenUsage.skill_id == skill_id)
+    if model_name:
+        trend_q = trend_q.filter(TokenUsage.model_name == model_name)
+    trend_q = trend_q.group_by(day_expr).order_by(day_expr)
+    trend_list = []
+    for row in trend_q.all():
+        day = row.day or "unknown"
+        in_t = int(row.input_tokens or 0)
+        out_t = int(row.output_tokens or 0)
+        trend_list.append({
+            "date": day,
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "total_tokens": in_t + out_t,
+            "calls": int(row.calls or 0),
+        })
 
-    # 按 Skill 分布
-    by_skill = {}
-    for r in records:
-        sid = r.skill_id or 0
-        if sid not in by_skill:
-            by_skill[sid] = {"skill_id": sid, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
-        by_skill[sid]["input_tokens"] += r.input_tokens
-        by_skill[sid]["output_tokens"] += r.output_tokens
-        by_skill[sid]["total_tokens"] += r.input_tokens + r.output_tokens
-        by_skill[sid]["calls"] += 1
-    # 关联 Skill 名称
-    from app.models import Skill
+    # 按 Skill 分布：SQL 聚合
+    skill_q = db.query(
+        TokenUsage.skill_id.label("sid"),
+        func.sum(TokenUsage.input_tokens).label("input_tokens"),
+        func.sum(TokenUsage.output_tokens).label("output_tokens"),
+        func.count(TokenUsage.id).label("calls"),
+    ).filter(TokenUsage.created_at >= start_str)
+    if skill_id:
+        skill_q = skill_q.filter(TokenUsage.skill_id == skill_id)
+    if model_name:
+        skill_q = skill_q.filter(TokenUsage.model_name == model_name)
+    skill_q = skill_q.group_by(TokenUsage.skill_id)
     skill_map = {s.id: s.name for s in db.query(Skill).all()}
     by_skill_list = []
-    for sid, v in by_skill.items():
-        v["skill_name"] = skill_map.get(sid, "未知")
-        by_skill_list.append(v)
+    for row in skill_q.all():
+        sid = row.sid or 0
+        in_t = int(row.input_tokens or 0)
+        out_t = int(row.output_tokens or 0)
+        by_skill_list.append({
+            "skill_id": sid,
+            "skill_name": skill_map.get(sid, "未知"),
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "total_tokens": in_t + out_t,
+            "calls": int(row.calls or 0),
+        })
 
-    # 按调用类型分布
-    by_call_type = {}
-    for r in records:
-        ct = r.call_type or "unknown"
-        if ct not in by_call_type:
-            by_call_type[ct] = {"call_type": ct, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "calls": 0}
-        by_call_type[ct]["input_tokens"] += r.input_tokens
-        by_call_type[ct]["output_tokens"] += r.output_tokens
-        by_call_type[ct]["total_tokens"] += r.input_tokens + r.output_tokens
-        by_call_type[ct]["calls"] += 1
-    by_call_type_list = list(by_call_type.values())
+    # 按调用类型分布：SQL 聚合
+    ct_q = db.query(
+        TokenUsage.call_type.label("ct"),
+        func.sum(TokenUsage.input_tokens).label("input_tokens"),
+        func.sum(TokenUsage.output_tokens).label("output_tokens"),
+        func.count(TokenUsage.id).label("calls"),
+    ).filter(TokenUsage.created_at >= start_str)
+    if skill_id:
+        ct_q = ct_q.filter(TokenUsage.skill_id == skill_id)
+    if model_name:
+        ct_q = ct_q.filter(TokenUsage.model_name == model_name)
+    ct_q = ct_q.group_by(TokenUsage.call_type)
+    by_call_type_list = []
+    for row in ct_q.all():
+        ct = row.ct or "unknown"
+        in_t = int(row.input_tokens or 0)
+        out_t = int(row.output_tokens or 0)
+        by_call_type_list.append({
+            "call_type": ct,
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "total_tokens": in_t + out_t,
+            "calls": int(row.calls or 0),
+        })
 
     return success({
         "total_tokens": total_tokens,
@@ -119,7 +165,55 @@ def token_stats(
             "cache_hit_rate": cache_hit_rate,
             "tokens_saved": tokens_saved,
         },
+        "cost_estimate": _estimate_cost(db, start_str, skill_id, model_name),
     })
+
+
+def _estimate_cost(db, start_str: str, skill_id: int = None, model_name: str = None) -> dict:
+    """基于模型单价估算 Token 成本（元）"""
+    from app.models import ModelConfig as MC
+    # 加载所有模型的价格配置
+    models = db.query(MC).all()
+    price_map = {}
+    for m in models:
+        price_map[m.model_name] = {
+            "input_price": m.input_price or 0.0,
+            "output_price": m.output_price or 0.0,
+        }
+
+    # 按模型名聚合 Token 使用量（应用筛选条件）
+    model_agg = db.query(
+        TokenUsage.model_name.label("mn"),
+        func.sum(TokenUsage.input_tokens).label("in_t"),
+        func.sum(TokenUsage.output_tokens).label("out_t"),
+    ).filter(TokenUsage.created_at >= start_str)
+    if skill_id:
+        model_agg = model_agg.filter(TokenUsage.skill_id == skill_id)
+    if model_name:
+        model_agg = model_agg.filter(TokenUsage.model_name == model_name)
+    model_agg = model_agg.group_by(TokenUsage.model_name)
+
+    total_cost = 0.0
+    by_model = []
+    for row in model_agg.all():
+        mn = row.mn or "unknown"
+        in_t = int(row.in_t or 0)
+        out_t = int(row.out_t or 0)
+        prices = price_map.get(mn, {"input_price": 0.0, "output_price": 0.0})
+        cost = (in_t / 1000.0) * prices["input_price"] + (out_t / 1000.0) * prices["output_price"]
+        total_cost += cost
+        if cost > 0 or in_t > 0 or out_t > 0:
+            by_model.append({
+                "model_name": mn,
+                "input_tokens": in_t,
+                "output_tokens": out_t,
+                "cost": round(cost, 4),
+            })
+
+    return {
+        "total_cost": round(total_cost, 4),
+        "by_model": by_model,
+    }
 
 
 @router.get("/call-logs")
@@ -148,7 +242,8 @@ def call_logs(
 
     q = db.query(QAHistory).filter(QAHistory.created_at >= start_str)
     if end_date and time_range == "custom":
-        q = q.filter(QAHistory.created_at <= end_date + " 23:59:59")
+        # created_at 存储为 ISO 格式（T 分隔符），用 T23:59:59 避免当天数据丢失
+        q = q.filter(QAHistory.created_at <= end_date + "T23:59:59")
     if skill_id:
         q = q.filter(QAHistory.skill_id == skill_id)
 
@@ -201,7 +296,8 @@ def model_call_logs(
 
     q = db.query(TokenUsage).filter(TokenUsage.created_at >= start_str)
     if end_date and time_range == "custom":
-        q = q.filter(TokenUsage.created_at <= end_date + " 23:59:59")
+        # created_at 存储为 ISO 格式（T 分隔符），用 T23:59:59 避免当天数据丢失
+        q = q.filter(TokenUsage.created_at <= end_date + "T23:59:59")
     if call_type:
         q = q.filter(TokenUsage.call_type == call_type)
     if model_name:

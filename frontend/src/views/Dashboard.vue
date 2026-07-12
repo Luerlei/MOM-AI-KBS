@@ -1,5 +1,15 @@
 <template>
   <div class="dashboard">
+    <!-- 时间范围筛选 -->
+    <div class="time-filter">
+      <a-radio-group v-model:value="timeRange" button-style="solid" size="small" @change="loadData">
+        <a-radio-button value="today">今日</a-radio-button>
+        <a-radio-button value="week">本周</a-radio-button>
+        <a-radio-button value="month">本月</a-radio-button>
+        <a-radio-button value="all">全部</a-radio-button>
+      </a-radio-group>
+    </div>
+
     <!-- 统计卡片 -->
     <a-row :gutter="16" class="stats-row">
       <a-col :xs="24" :sm="12" :lg="6">
@@ -31,7 +41,7 @@
       <a-col :xs="24" :sm="12" :lg="6">
         <a-card class="stat-card clickable-card" :loading="loading" @click="$router.push('/qa/history')">
           <a-statistic
-            title="今日问答"
+            :title="qaCountLabel"
             :value="stats.today_qa_count"
             :value-style="{ color: '#faad14' }"
           >
@@ -122,7 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   FileTextOutlined,
   ThunderboltOutlined,
@@ -137,6 +147,7 @@ import { getDashboardStats, getRecentQA } from '@/api/dashboard'
 import type { DashboardStats, DashboardRecentQA } from '@/types'
 
 const loading = ref(true)
+const timeRange = ref<string>('today')
 const stats = ref<DashboardStats>({
   knowledge_count: 0,
   skill_count: 0,
@@ -145,6 +156,16 @@ const stats = ref<DashboardStats>({
   model_count: 0
 })
 const recentQA = ref<DashboardRecentQA[]>([])
+
+const qaCountLabel = computed(() => {
+  const map: Record<string, string> = {
+    today: '今日问答',
+    week: '本周问答',
+    month: '本月问答',
+    all: '全部问答'
+  }
+  return map[timeRange.value] || '问答数'
+})
 
 function truncateText(text: string, max: number): string {
   if (!text) return ''
@@ -159,8 +180,8 @@ async function loadData(): Promise<void> {
   loading.value = true
   try {
     const [statsRes, qaRes] = await Promise.all([
-      getDashboardStats(),
-      getRecentQA()
+      getDashboardStats(timeRange.value),
+      getRecentQA(timeRange.value)
     ])
     stats.value = statsRes
     recentQA.value = qaRes
@@ -178,6 +199,11 @@ onMounted(loadData)
 .dashboard {
   max-width: 1400px;
   margin: 0 auto;
+}
+
+.time-filter {
+  margin-bottom: 16px;
+  text-align: right;
 }
 
 .stat-card {

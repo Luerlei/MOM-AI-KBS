@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class KnowledgeBase(BaseModel):
     title: str
     content: str = ""
-    content_type: str = "标准文档"
+    content_type: str = "markdown"
     category_id: Optional[int] = None
     tag_ids: List[int] = []
 
@@ -64,6 +64,7 @@ CategoryOut.model_rebuild()
 
 class TagBase(BaseModel):
     name: str
+    color: Optional[str] = None
 
 
 class TagCreate(TagBase):

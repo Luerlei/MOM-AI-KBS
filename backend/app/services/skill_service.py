@@ -6,6 +6,15 @@ from app.schemas.skill import SkillCreate, SkillUpdate
 from app.utils.response import APIError
 
 
+def _invalidate_skill_cache():
+    """清除 Skill description embedding 缓存（修改 Skill 后调用）"""
+    try:
+        from app.services.skill_router import _skill_embedding_cache
+        _skill_embedding_cache.clear()
+    except Exception:
+        pass
+
+
 # 预设 Skill 模板
 SKILL_TEMPLATES = [
     {
@@ -134,6 +143,7 @@ def create(db, data: SkillCreate) -> Skill:
     db.add(s)
     db.commit()
     db.refresh(s)
+    _invalidate_skill_cache()
     return s
 
 
@@ -160,6 +170,7 @@ def update(db, id: int, data: SkillUpdate) -> Skill:
         s.enabled = data.enabled
     db.commit()
     db.refresh(s)
+    _invalidate_skill_cache()
     return s
 
 
@@ -170,6 +181,7 @@ def delete(db, id: int):
         raise APIError("默认Skill不允许删除", status_code=400)
     db.delete(s)
     db.commit()
+    _invalidate_skill_cache()
 
 
 def toggle(db, id: int) -> Skill:
@@ -180,6 +192,7 @@ def toggle(db, id: int) -> Skill:
     s.enabled = not s.enabled
     db.commit()
     db.refresh(s)
+    _invalidate_skill_cache()
     return s
 
 

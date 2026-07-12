@@ -23,9 +23,11 @@ def _get_client():
 
 
 def _get_collection(name: str):
-    """获取或创建 collection"""
+    """获取或创建 collection（使用余弦距离）"""
     client = _get_client()
-    return client.get_or_create_collection(name=name)
+    return client.get_or_create_collection(
+        name=name, metadata={"hnsw:space": "cosine"}
+    )
 
 
 def _rebuild_collection(name: str):
@@ -36,7 +38,9 @@ def _rebuild_collection(name: str):
         logger.info(f"[VectorStore] 已删除旧 collection: {name}（维度不匹配，重建中）")
     except Exception as e:
         logger.warning(f"[VectorStore] 删除 collection {name} 失败: {e}")
-    return client.get_or_create_collection(name=name)
+    return client.get_or_create_collection(
+        name=name, metadata={"hnsw:space": "cosine"}
+    )
 
 
 class VectorStore:
@@ -81,13 +85,15 @@ class VectorStore:
         except Exception as e:
             # 维度不匹配时自动重建 collection 后重试
             if "embedding with dimension" in str(e) or "dimension" in str(e).lower():
-                logger.warning(f"[VectorStore] 检测到维度不匹配，重建 collection: {e}")
+                logger.warning(
+                    f"[VectorStore] 检测到 Embedding 维度不匹配，将重建 collection 并清空所有向量数据: {e}"
+                )
                 collection = _rebuild_collection(self.KNOWLEDGE_COLLECTION)
                 # 同时清空缓存 collection（维度也不匹配）
                 try:
                     _rebuild_collection(self.CACHE_COLLECTION)
                 except Exception:
-                    pass
+                    logger.exception("[VectorStore] 重建缓存 collection 失败")
                 collection.add(
                     ids=ids,
                     documents=chunks,
@@ -104,11 +110,21 @@ class VectorStore:
         try:
             collection.delete(where={"knowledge_id": knowledge_id})
         except Exception:
-            # 兼容 ChromaDB 不支持 where 删除的情况：按 ID 前缀删除
-            existing = collection.get()
-            ids_to_delete = [i for i in existing.get("ids", []) if i.startswith(f"{knowledge_id}_")]
-            if ids_to_delete:
-                collection.delete(ids=ids_to_delete)
+            # 兼容 ChromaDB 不支持 where 删除的情况：按 metadata 条件查询后再删除
+            # K-P1-10: 用 where 条件查询而非全量 get()，避免大规模知识库 OOM
+            try:
+                existing = collection.get(where={"knowledge_id": knowledge_id})
+                ids_to_delete = existing.get("ids", [])
+                if ids_to_delete:
+                    collection.delete(ids=ids_to_delete)
+            except Exception:
+                # 最终回退：按 ID 前缀逐批查询（限制单批数量，防止全量加载）
+                logger.warning(f"[VectorStore.delete] where 条件查询失败，回退到按前缀查询 knowledge_id={knowledge_id}")
+                # 使用 limit 分批获取，避免全量加载
+                existing = collection.get(limit=10000)
+                ids_to_delete = [i for i in existing.get("ids", []) if i.startswith(f"{knowledge_id}_")]
+                if ids_to_delete:
+                    collection.delete(ids=ids_to_delete)
 
     def search(self, query_embedding: list, where: Optional[dict] = None,
                top_k: int = 5, collection_name: str = None) -> list:
@@ -144,6 +160,38 @@ class VectorStore:
             })
         return out
 
+    def get_by_knowledge_id(self, knowledge_id: int, limit: int = 1) -> list:
+        """按 knowledge_id 获取向量数据（用于 BM25 命中但向量未命中的场景）
+
+        Args:
+            knowledge_id: 知识 ID
+            limit: 最多返回的 chunk 数
+
+        Returns:
+            list of dict: [{id, document, metadata, score}]
+        """
+        collection = _get_collection(self.KNOWLEDGE_COLLECTION)
+        try:
+            results = collection.get(
+                where={"knowledge_id": knowledge_id},
+                limit=limit,
+            )
+        except Exception:
+            logger.exception(f"[VectorStore.get_by_knowledge_id] 查询失败 kid={knowledge_id}")
+            return []
+        out = []
+        ids = results.get("ids", [])
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+        for i in range(len(ids)):
+            out.append({
+                "id": ids[i],
+                "document": docs[i] if i < len(docs) else "",
+                "metadata": metas[i] if i < len(metas) else {},
+                "score": 0.0,  # 无向量相似度分数
+            })
+        return out
+
     # -------- 答案缓存 collection --------
     def add_to_cache(self, question: str, answer_dict: dict, question_embedding: list):
         """将问答对写入缓存
@@ -162,16 +210,20 @@ class VectorStore:
             metadatas=[{"payload": json.dumps(answer_dict, ensure_ascii=False)}],
         )
 
-    def search_cache(self, query_embedding: list, threshold: float = 0.95) -> Optional[dict]:
+    def search_cache(self, query_embedding: list, threshold: float = None) -> Optional[dict]:
         """搜索缓存的答案
 
         Args:
             query_embedding: 查询向量
-            threshold: 相似度阈值
+            threshold: 相似度阈值（None 时使用全局配置 CACHE_SIMILARITY_THRESHOLD）
 
         Returns:
             命中缓存时返回 answer_dict，否则 None
         """
+        if threshold is None:
+            # 延迟导入避免循环依赖，使用全局配置阈值
+            from app.config import CACHE_SIMILARITY_THRESHOLD
+            threshold = CACHE_SIMILARITY_THRESHOLD
         collection = _get_collection(self.CACHE_COLLECTION)
         results = collection.query(
             query_embeddings=[query_embedding],
@@ -192,6 +244,23 @@ class VectorStore:
             return json.loads(payload)
         except Exception:
             return None
+
+    def clear_cache(self) -> int:
+        """清空答案缓存 collection（知识更新/删除时调用，防止返回过期内容）
+
+        Returns:
+            被清除的缓存条数（无法精确统计时返回 0）
+        """
+        try:
+            client = _get_client()
+            client.delete_collection(name=self.CACHE_COLLECTION)
+            # 立即重建空 collection，避免后续写入报错
+            _get_collection(self.CACHE_COLLECTION)
+            logger.info("[VectorStore] 答案缓存 collection 已清空")
+            return 0
+        except Exception:
+            logger.exception("[VectorStore] 清空答案缓存失败")
+            return 0
 
 
 # 单例

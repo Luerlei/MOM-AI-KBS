@@ -25,6 +25,14 @@
           <template v-else-if="column.key === 'api_url'">
             <span class="api-url">{{ record.api_url }}</span>
           </template>
+          <template v-else-if="column.key === 'price'">
+            <span v-if="record.type === 'Forecast'" class="price-na">—</span>
+            <span v-else-if="!record.input_price && !record.output_price" class="price-na">未设置</span>
+            <span v-else class="price-cell">
+              <span>入{{ record.input_price }}</span>
+              <span>出{{ record.output_price }}</span>
+            </span>
+          </template>
           <template v-else-if="column.key === 'is_active'">
             <a-switch
               :checked="record.is_active"
@@ -81,6 +89,14 @@
           <template v-else-if="column.key === 'api_url'">
             <span class="api-url">{{ record.api_url }}</span>
           </template>
+          <template v-else-if="column.key === 'price'">
+            <span v-if="record.type === 'Forecast'" class="price-na">—</span>
+            <span v-else-if="!record.input_price && !record.output_price" class="price-na">未设置</span>
+            <span v-else class="price-cell">
+              <span>入{{ record.input_price }}</span>
+              <span>出{{ record.output_price }}</span>
+            </span>
+          </template>
           <template v-else-if="column.key === 'is_active'">
             <a-switch
               :checked="record.is_active"
@@ -136,6 +152,14 @@
           </template>
           <template v-else-if="column.key === 'api_url'">
             <span class="api-url">{{ record.api_url }}</span>
+          </template>
+          <template v-else-if="column.key === 'price'">
+            <span v-if="record.type === 'Forecast'" class="price-na">—</span>
+            <span v-else-if="!record.input_price && !record.output_price" class="price-na">未设置</span>
+            <span v-else class="price-cell">
+              <span>入{{ record.input_price }}</span>
+              <span>出{{ record.output_price }}</span>
+            </span>
           </template>
           <template v-else-if="column.key === 'is_active'">
             <a-switch
@@ -211,6 +235,35 @@
               : '例如：gpt-4 / qwen-plus'"
           />
         </a-form-item>
+        <a-form-item
+          v-if="form.type !== 'Forecast'"
+          label="Token 单价（元/千 token）"
+          name="price_group"
+        >
+          <a-input-group compact>
+            <a-input-number
+              v-model:value="form.input_price"
+              :min="0"
+              :step="0.001"
+              :precision="4"
+              style="width: calc(50% - 12px)"
+              placeholder="输入单价"
+            >
+              <template #addonBefore>输入</template>
+            </a-input-number>
+            <a-input-number
+              v-model:value="form.output_price"
+              :min="0"
+              :step="0.001"
+              :precision="4"
+              style="width: calc(50% - 12px); margin-left: 24px"
+              placeholder="输出单价"
+            >
+              <template #addonBefore>输出</template>
+            </a-input-number>
+          </a-input-group>
+          <div class="price-hint">用于 Token 统计页估算成本，留空或 0 表示不估算</div>
+        </a-form-item>
       </a-form>
     </a-modal>
 
@@ -256,6 +309,7 @@ const columns = [
   { title: '名称', key: 'name', dataIndex: 'name' },
   { title: '模型', key: 'model_name', dataIndex: 'model_name', width: 180 },
   { title: 'API 地址', key: 'api_url', dataIndex: 'api_url', ellipsis: true },
+  { title: '单价(元/千)', key: 'price', width: 140 },
   { title: '启用', key: 'is_active', dataIndex: 'is_active', width: 80 },
   { title: '操作', key: 'action', width: 200, fixed: 'right' as const }
 ]
@@ -276,12 +330,16 @@ const form = ref<{
   api_url: string
   api_key: string
   model_name: string
+  input_price: number
+  output_price: number
 }>({
   name: '',
   type: 'LLM',
   api_url: '',
   api_key: '',
-  model_name: ''
+  model_name: '',
+  input_price: 0,
+  output_price: 0
 })
 
 const formRules = computed(() => ({
@@ -305,7 +363,9 @@ function openCreateModal(type: ModelType): void {
     type,
     api_url: '',
     api_key: '',
-    model_name: ''
+    model_name: '',
+    input_price: 0,
+    output_price: 0
   }
   formVisible.value = true
 }
@@ -317,7 +377,9 @@ function openEditModal(record: ModelConfig): void {
     type: record.type,
     api_url: record.api_url,
     api_key: '',
-    model_name: record.model_name
+    model_name: record.model_name,
+    input_price: record.input_price ?? 0,
+    output_price: record.output_price ?? 0
   }
   formVisible.value = true
 }
@@ -429,6 +491,25 @@ onMounted(() => {
 .api-url {
   font-family: 'SFMono-Regular', Consolas, monospace;
   font-size: 12px;
+  color: rgba(0, 0, 0, 0.65);
+}
+
+.price-hint {
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.45);
+  margin-top: 4px;
+}
+
+.price-na {
+  color: rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+
+.price-cell {
+  display: inline-flex;
+  flex-direction: column;
+  font-size: 12px;
+  line-height: 1.4;
   color: rgba(0, 0, 0, 0.65);
 }
 </style>

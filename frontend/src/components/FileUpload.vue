@@ -12,7 +12,7 @@
       </p>
       <p class="ant-upload-text">点击或拖拽文件到此处上传</p>
       <p class="ant-upload-hint">
-        支持单次或批量上传，支持 .md / .txt / .pdf / .doc / .docx 等格式
+        支持 .md / .txt / .pdf / .doc / .docx / .html / .xlsx / .xls / .csv 等格式
       </p>
     </a-upload-dragger>
 
@@ -66,7 +66,7 @@ const props = withDefaults(
     maxSize?: number
   }>(),
   {
-    accept: '.md,.txt,.pdf,.doc,.docx,.html',
+    accept: '.md,.txt,.pdf,.doc,.docx,.html,.xlsx,.xls,.csv',
     maxSize: 50
   }
 )

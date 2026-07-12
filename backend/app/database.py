@@ -1,8 +1,12 @@
 """数据库连接和会话管理"""
+import logging
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
@@ -41,10 +45,21 @@ def _auto_migrate():
         ],
         "forecast_tasks": [
             ("start_index", "INTEGER"),
+            ("is_internal", "INTEGER DEFAULT 0"),
         ],
         "forecast_results": [
             ("actuals", "TEXT DEFAULT '[]'"),
             ("metrics", "TEXT DEFAULT '{}'"),
+        ],
+        "tags": [
+            ("color", "VARCHAR(20)"),
+        ],
+        "model_configs": [
+            ("input_price", "FLOAT DEFAULT 0.0"),
+            ("output_price", "FLOAT DEFAULT 0.0"),
+        ],
+        "qa_history": [
+            ("is_cache_hit", "INTEGER DEFAULT 0"),
         ],
     }
     try:
@@ -59,4 +74,4 @@ def _auto_migrate():
                     conn.commit()
         conn.close()
     except Exception:
-        pass
+        logger.exception("[database] _auto_migrate 执行失败")

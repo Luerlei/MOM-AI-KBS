@@ -39,6 +39,14 @@
             </a-form-item>
           </a-col>
         </a-row>
+        <a-row>
+          <a-col :span="24">
+            <a-form-item>
+              <a-switch v-model:checked="metaForm.auto_tag" />
+              <span class="auto-tag-label">自动打标签（AI 分析文档内容，自动匹配或新建 1-3 个标签）</span>
+            </a-form-item>
+          </a-col>
+        </a-row>
       </div>
 
       <!-- 操作按钮 -->
@@ -91,7 +99,8 @@ const tags = ref<Tag[]>([])
 
 const metaForm = ref({
   category_id: null as number | null,
-  tag_ids: [] as number[]
+  tag_ids: [] as number[],
+  auto_tag: false
 })
 
 const categoryTreeData = computed<Category[]>(() => categories.value)
@@ -115,7 +124,11 @@ async function handleUpload(): Promise<void> {
   uploadResult.value = null
   const total = files.value.length
   try {
-    const result = await uploadKnowledgeFiles(files.value)
+    const result = await uploadKnowledgeFiles(files.value, {
+      category_id: metaForm.value.category_id,
+      tag_ids: metaForm.value.tag_ids,
+      auto_tag: metaForm.value.auto_tag
+    })
     const created = Array.isArray(result) ? result : []
     uploadResult.value = {
       success: created.length || total,
@@ -130,9 +143,9 @@ async function handleUpload(): Promise<void> {
   }
 }
 
-async function onCreateTag(name: string): Promise<void> {
+async function onCreateTag(name: string, color?: string): Promise<void> {
   try {
-    const tag = await createTag({ name })
+    const tag = await createTag({ name, color })
     tags.value.push(tag)
     metaForm.value.tag_ids.push(tag.id)
     message.success(`标签「${name}」已创建`)
@@ -181,5 +194,10 @@ onMounted(() => {
 
 .upload-result {
   margin-top: 16px;
+}
+
+.auto-tag-label {
+  margin-left: 8px;
+  color: rgba(0, 0, 0, 0.65);
 }
 </style>

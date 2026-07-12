@@ -1,4 +1,6 @@
 """LLM 客户端抽象层（OpenAI 兼容格式）"""
+import logging
+import os
 import ssl
 import time
 from abc import ABC, abstractmethod
@@ -8,11 +10,19 @@ import httpx
 
 from app.utils.response import APIError
 
+logger = logging.getLogger(__name__)
+
 
 def _build_ssl_context() -> ssl.SSLContext:
-    """构建兼容性更好的 SSL 上下文（降低安全级别以兼容部分服务商）"""
+    """构建 SSL 上下文。
+
+    默认使用系统默认安全级别（不降低）。
+    仅在环境变量 SSL_SECLEVEL=1 时回退到兼容模式（用于部分老服务商证书）。
+    """
     ctx = ssl.create_default_context()
-    ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+    if os.getenv("SSL_SECLEVEL", "") == "1":
+        logger.warning("[security] SSL_SECLEVEL=1 已启用，降低了证书校验安全级别")
+        ctx.set_ciphers("DEFAULT@SECLEVEL=1")
     return ctx
 
 
@@ -90,17 +100,31 @@ class OpenAICompatibleClient(LLMClient):
             )
             duration_ms = int((time.time() - start) * 1000)
             if resp.status_code != 200:
+                # 记录上游响应详情到日志（便于排查），但不返回给客户端（可能含敏感信息）
+                logger.error(
+                    f"[LLM.chat] 上游响应非 200: status={resp.status_code} url={self.api_url}/chat/completions "
+                    f"model={self.model_name} body={resp.text[:500]}"
+                )
                 raise APIError(
-                    f"LLM 调用失败({resp.status_code}): {resp.text[:200]}",
+                    f"LLM 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
                     status_code=502,
                 )
             data = resp.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             usage = data.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            # 同步设置 last_usage，供调用方读取（与 chat_stream/embed 行为一致）
+            self.last_usage = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "model": data.get("model", self.model_name),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
             return {
                 "content": content,
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "model": data.get("model", self.model_name),
                 "duration_ms": duration_ms,
             }
@@ -132,8 +156,14 @@ class OpenAICompatibleClient(LLMClient):
             ) as resp:
                 if resp.status_code != 200:
                     text = await resp.aread()
+                    # 记录上游响应详情到日志（便于排查），但不返回给客户端
+                    logger.error(
+                        f"[LLM.chat_stream] 上游响应非 200: status={resp.status_code} "
+                        f"url={self.api_url}/chat/completions model={self.model_name} "
+                        f"body={text.decode()[:500]}"
+                    )
                     raise APIError(
-                        f"LLM 流式调用失败({resp.status_code}): {text.decode()[:200]}",
+                        f"LLM 流式调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
                         status_code=502,
                     )
                 async for line in resp.aiter_lines():
@@ -184,8 +214,14 @@ class OpenAICompatibleClient(LLMClient):
                 json=payload,
             )
             if resp.status_code != 200:
+                # 记录上游响应详情到日志（便于排查），但不返回给客户端
+                logger.error(
+                    f"[LLM.embedding] 上游响应非 200: status={resp.status_code} "
+                    f"url={self.api_url}/embeddings model={self.model_name} "
+                    f"body={resp.text[:500]}"
+                )
                 raise APIError(
-                    f"Embedding 调用失败({resp.status_code}): {resp.text[:200]}",
+                    f"Embedding 调用失败（HTTP {resp.status_code}），请检查模型配置或稍后重试。",
                     status_code=502,
                 )
             data = resp.json()
@@ -269,9 +305,13 @@ class ForecastClient:
             forecasts = data.get("forecasts", [])
             quantile_result = data.get("quantiles", {})
             model = data.get("model", self.model_name)
+            # Forecast 是时序预测，没有 token 概念；用 input_points/output_points 记录点数，
+            # 保留 input_tokens/output_tokens 仅向后兼容旧的日志读取代码。
             self.last_usage = {
-                "input_tokens": len(series),    # 复用 token 字段记录输入点数
-                "output_tokens": len(forecasts),  # 复用 token 字段记录输出点数
+                "input_tokens": 0,                # Forecast 不消耗 token
+                "output_tokens": 0,               # Forecast 不消耗 token
+                "input_points": len(series),      # 输入数据点数
+                "output_points": len(forecasts),  # 输出数据点数
                 "model": model,
                 "duration_ms": duration_ms,
             }
@@ -286,75 +326,127 @@ class ForecastClient:
 
 
 class ModelManager:
-    """模型管理器：从数据库读取启用的模型配置"""
+    """模型管理器：从数据库读取启用的模型配置（带内存缓存）
 
-    @staticmethod
-    def get_active_llm() -> OpenAICompatibleClient:
-        """获取启用的 LLM 客户端"""
-        from app.database import SessionLocal
+    缓存策略：
+    - 首次 get_active_* 时从 DB 读取并构造客户端，缓存在内存中
+    - activate/update/delete 时调用 invalidate_cache() 主动失效
+    - 避免每次问答/向量化都新建 DB Session + 解密 API Key
+    """
+    _cache: dict = {}  # {type: client}
+    _cache_config_id: dict = {}  # {type: config_id}（用于判断缓存是否还有效）
+
+    @classmethod
+    def invalidate_cache(cls, model_type: str = None):
+        """失效缓存
+
+        Args:
+            model_type: 指定类型（LLM/Embedding/Forecast）；None 则清空全部
+        """
+        if model_type:
+            cls._cache.pop(model_type, None)
+            cls._cache_config_id.pop(model_type, None)
+        else:
+            cls._cache.clear()
+            cls._cache_config_id.clear()
+        logger.debug(f"[ModelManager] 缓存已失效 type={model_type or 'all'}")
+
+    @classmethod
+    def _get_active_config(cls, db, model_type: str):
+        """从 DB 读取指定类型的启用配置，返回 (config, config_id)"""
         from app.models import ModelConfig
 
-        db = SessionLocal()
-        try:
-            config = (
-                db.query(ModelConfig)
-                .filter(ModelConfig.type == "LLM", ModelConfig.is_active == True)  # noqa: E712
-                .first()
-            )
-            if not config:
-                raise APIError("未配置启用的LLM模型，请先在模型配置页面配置", status_code=400)
-            return OpenAICompatibleClient(config)
-        finally:
-            db.close()
+        config = (
+            db.query(ModelConfig)
+            .filter(ModelConfig.type == model_type, ModelConfig.is_active == True)  # noqa: E712
+            .first()
+        )
+        return config
 
-    @staticmethod
-    def get_active_embedding() -> LLMClient:
+    @classmethod
+    def _get_or_create_client(cls, model_type: str, client_factory):
+        """获取或创建客户端（带缓存）
+
+        Args:
+            model_type: LLM / Embedding / Forecast
+            client_factory: callable(config) -> client，根据 config 构造客户端
+        """
+        from app.database import SessionLocal
+
+        # 命中缓存：检查配置是否仍然启用
+        if model_type in cls._cache:
+            cached_client = cls._cache[model_type]
+            cached_config_id = cls._cache_config_id.get(model_type)
+            # 用轻量查询确认配置仍然启用且未变更
+            db = SessionLocal()
+            try:
+                current = cls._get_active_config(db, model_type)
+                if current and current.id == cached_config_id:
+                    return cached_client
+                # 配置已变更或失效，清理
+                cls._cache.pop(model_type, None)
+                cls._cache_config_id.pop(model_type, None)
+                if not current:
+                    return None
+                config = current
+            finally:
+                db.close()
+        else:
+            db = SessionLocal()
+            try:
+                config = cls._get_active_config(db, model_type)
+                if not config:
+                    return None
+            finally:
+                db.close()
+
+        # 创建新客户端
+        client = client_factory(config)
+        cls._cache[model_type] = client
+        cls._cache_config_id[model_type] = config.id
+        return client
+
+    @classmethod
+    def get_active_llm(cls) -> OpenAICompatibleClient:
+        """获取启用的 LLM 客户端"""
+        client = cls._get_or_create_client("LLM", lambda c: OpenAICompatibleClient(c))
+        if not client:
+            raise APIError("未配置启用的LLM模型，请先在模型配置页面配置", status_code=400)
+        return client
+
+    @classmethod
+    def get_active_embedding(cls) -> LLMClient:
         """获取启用的 Embedding 客户端
 
         仅从数据库读取用户显式配置的 Embedding 模型；未配置时抛 APIError，
         调用方应捕获并降级（如 RAG 降级为直接对话）。
         """
-        from app.database import SessionLocal
-        from app.models import ModelConfig
+        client = cls._get_or_create_client("Embedding", lambda c: OpenAICompatibleClient(c))
+        if not client:
+            raise APIError("未配置启用的 Embedding 模型，请在模型配置页添加", status_code=400)
+        return client
 
-        db = SessionLocal()
-        try:
-            config = (
-                db.query(ModelConfig)
-                .filter(ModelConfig.type == "Embedding", ModelConfig.is_active == True)  # noqa: E712
-                .first()
-            )
-            if config:
-                return OpenAICompatibleClient(config)
-        finally:
-            db.close()
-
-        # 未配置外部 Embedding 模型时抛错，调用方应捕获并降级（如 RAG 降级为直接对话）
-        raise APIError("未配置启用的 Embedding 模型，请在模型配置页添加", status_code=400)
-
-    @staticmethod
-    def get_active_forecast() -> ForecastClient:
+    @classmethod
+    def get_active_forecast(cls) -> ForecastClient:
         """获取启用的 Forecast 客户端（时序预测模型）
 
         从数据库读取 type=Forecast 且启用的配置；未配置时抛 APIError，
         调用方应捕获并提示用户在模型配置页添加。
         """
-        from app.database import SessionLocal
-        from app.models import ModelConfig
+        client = cls._get_or_create_client("Forecast", lambda c: ForecastClient(c))
+        if not client:
+            raise APIError("未配置启用的 Forecast 时序预测模型，请在模型配置页添加", status_code=400)
+        return client
 
-        db = SessionLocal()
-        try:
-            config = (
-                db.query(ModelConfig)
-                .filter(ModelConfig.type == "Forecast", ModelConfig.is_active == True)  # noqa: E712
-                .first()
-            )
-            if config:
-                return ForecastClient(config)
-        finally:
-            db.close()
-
-        raise APIError("未配置启用的 Forecast 时序预测模型，请在模型配置页添加", status_code=400)
+    @classmethod
+    def reload_forecast(cls, db):
+        """强制重新加载 Forecast 客户端（多模型对比时切换激活模型后调用）"""
+        cls.invalidate_cache("Forecast")
+        # 预加载新配置到缓存
+        config = cls._get_active_config(db, "Forecast")
+        if config:
+            cls._cache["Forecast"] = ForecastClient(config)
+            cls._cache_config_id["Forecast"] = config.id
 
 
 model_manager = ModelManager()

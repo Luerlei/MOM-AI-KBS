@@ -1,17 +1,24 @@
 """FastAPI应用入口"""
+import logging
+import os
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import DEBUG
+from app.config import DEBUG, get_cors_origins, validate_security_config
 from app.database import init_db
 from app.utils.response import success, error, APIError
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
+    # 启动时安全校验
+    validate_security_config()
     init_db()
     # 初始化预制数据
     from app.services.seed_service import seed_initial_data
@@ -31,11 +38,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS：从环境变量 CORS_ORIGINS 读取（逗号分隔），开发环境默认 *，
+# 生产环境应明确指定来源（如 http://localhost:5173,https://your.domain）
+_origins = get_cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_origins,
+    # 注意：allow_origins=["*"] 时 allow_credentials 不能为 True（浏览器会拒绝）
+    # 仅在指定具体来源时才允许 credentials
+    allow_credentials=_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,43 +63,45 @@ async def api_error_handler(request: Request, exc: APIError):
 
 @app.exception_handler(Exception)
 async def general_error_handler(request: Request, exc: Exception):
+    # 详情只进日志，不返回给客户端（避免泄露栈/路径/SQL 等敏感信息）
+    logger.exception(f"[unhandled] {request.method} {request.url.path}")
     return JSONResponse(
         status_code=500,
-        content=error(f"服务器内部错误: {str(exc)}", status_code=500),
+        content=error("服务器内部错误", status_code=500),
     )
 
 
 # 健康检查
 @app.get("/health")
 async def health_check():
-    """健康检查端点"""
+    """健康检查端点
+
+    使用 `with SessionLocal() as db:` 保证异常分支也会关闭 session。
+    """
+    import sqlalchemy
     from app.database import SessionLocal
     from app.models import ModelConfig
     from app.config import VECTOR_DB_PATH
-    import os
 
-    db = SessionLocal()
+    # 数据库状态
     try:
-        db.execute(__import__("sqlalchemy").text("SELECT 1"))
+        with SessionLocal() as db:
+            db.execute(sqlalchemy.text("SELECT 1"))
+            llm_count = db.query(ModelConfig).filter(ModelConfig.type == "LLM").count()
+            embedding_count = db.query(ModelConfig).filter(ModelConfig.type == "Embedding").count()
+            forecast_count = db.query(ModelConfig).filter(ModelConfig.type == "Forecast").count()
         db_status = "ok"
+        model_status = {
+            "llm_configs": llm_count,
+            "embedding_configs": embedding_count,
+            "forecast_configs": forecast_count,
+        }
     except Exception as e:
         db_status = f"error: {e}"
-    finally:
-        db.close()
+        model_status = "error"
 
     # 向量库状态
     vector_status = "ok" if os.path.exists(VECTOR_DB_PATH) else "not_initialized"
-
-    # 模型配置状态
-    try:
-        db = SessionLocal()
-        llm_count = db.query(ModelConfig).filter(ModelConfig.type == "LLM").count()
-        embedding_count = db.query(ModelConfig).filter(ModelConfig.type == "Embedding").count()
-        forecast_count = db.query(ModelConfig).filter(ModelConfig.type == "Forecast").count()
-        model_status = {"llm_configs": llm_count, "embedding_configs": embedding_count, "forecast_configs": forecast_count}
-        db.close()
-    except Exception:
-        model_status = "error"
 
     return success({
         "status": "healthy",
@@ -105,8 +118,9 @@ async def root():
 
 
 # 注册路由
-from app.routers import knowledge, category, tag, skill, skill_option, model_config, search, qa, dashboard, token_stats, dataset, forecast  # noqa: E402
+from app.routers import knowledge, category, tag, skill, skill_option, model_config, search, qa, dashboard, token_stats, dataset, forecast, auth  # noqa: E402
 
+app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识管理"])
 app.include_router(category.router, prefix="/api/categories", tags=["分类管理"])
 app.include_router(tag.router, prefix="/api/tags", tags=["标签管理"])

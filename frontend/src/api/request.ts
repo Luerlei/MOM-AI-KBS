@@ -2,6 +2,9 @@ import axios, { type AxiosInstance, type AxiosRequestConfig, type AxiosResponse 
 import { message } from 'ant-design-vue'
 import type { ApiResponse } from '@/types'
 
+// 防止 401 时重复跳转
+let isRedirecting = false
+
 /**
  * Axios 实例
  */
@@ -54,7 +57,17 @@ service.interceptors.response.use(
     const status = error.response?.status
     const msg = error.response?.data?.message || error.message || '网络异常'
     if (status === 401) {
-      message.error('未授权，请重新登录')
+      // 清除 token，跳转登录页（防重复跳转）
+      localStorage.removeItem('token')
+      localStorage.removeItem('username')
+      if (!isRedirecting) {
+        isRedirecting = true
+        message.error('登录已过期，请重新登录')
+        import('@/router').then(({ default: router }) => {
+          router.replace({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+          isRedirecting = false
+        })
+      }
     } else if (status === 403) {
       message.error('禁止访问')
     } else if (status === 404) {

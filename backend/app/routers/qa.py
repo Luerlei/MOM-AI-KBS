@@ -11,9 +11,10 @@ from app.database import get_db
 from app.schemas.qa import QARequest, QAFeedback
 from app.services import qa_service
 from app.utils.response import success, page_result
+from app.utils.auth import require_auth
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 @router.post("/ask")
@@ -70,9 +71,14 @@ def feedback(data: QAFeedback, db: Session = Depends(get_db)):
 
 
 @router.get("/suggestions")
-def suggestions(question: str, db: Session = Depends(get_db)):
-    """快捷追问推荐"""
-    items = qa_service.get_suggestions(db, question)
+async def suggestions(question: str, answer: Optional[str] = None, db: Session = Depends(get_db)):
+    """快捷追问推荐
+
+    Args:
+        question: 用户问题
+        answer: AI 回答（可选，传入后 LLM 追问质量更高）
+    """
+    items = await qa_service.get_suggestions(db, question, answer)
     return success(items)
 
 

@@ -14,15 +14,15 @@ import type {
 /**
  * 仪表盘统计
  */
-export function getDashboardStats(): Promise<DashboardStats> {
-  return get<DashboardStats>('/dashboard/stats')
+export function getDashboardStats(timeRange?: string): Promise<DashboardStats> {
+  return get<DashboardStats>('/dashboard/stats', timeRange ? { time_range: timeRange } : undefined)
 }
 
 /**
  * 最近问答
  */
-export function getRecentQA(): Promise<DashboardRecentQA[]> {
-  return get<DashboardRecentQA[]>('/dashboard/recent-qa')
+export function getRecentQA(timeRange?: string): Promise<DashboardRecentQA[]> {
+  return get<DashboardRecentQA[]>('/dashboard/recent-qa', timeRange ? { time_range: timeRange } : undefined)
 }
 
 /**

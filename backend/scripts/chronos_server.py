@@ -28,6 +28,7 @@ from pydantic import BaseModel
 # 模型懒加载（启动时加载一次）
 _pipeline = None
 _model_id = "amazon/chronos-t5-small"
+_device = "cpu"
 
 
 class PredictRequest(BaseModel):
@@ -56,8 +57,8 @@ def get_pipeline():
             local_dir=local_dir,
         )
         print(f"[chronos] 模型已下载到: {local_path}")
-        _pipeline = ChronosPipeline.from_pretrained(local_path)
-        print(f"[chronos] 模型加载完成")
+        _pipeline = ChronosPipeline.from_pretrained(local_path, device=_device)
+        print(f"[chronos] 模型加载完成 (device={_device})")
     return _pipeline
 
 
@@ -110,6 +111,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     _model_id = args.model
+    _device = args.device
 
     import uvicorn
     print(f"[chronos] 启动服务: http://localhost:{args.port}")

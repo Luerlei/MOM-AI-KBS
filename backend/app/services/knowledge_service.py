@@ -1,5 +1,5 @@
 """知识管理服务"""
-import asyncio
+import logging
 import os
 from typing import Optional
 
@@ -9,11 +9,23 @@ from app.schemas.knowledge import KnowledgeCreate, KnowledgeUpdate, BatchOperati
 from app.utils.response import APIError
 from app.services.text_chunker import chunk as chunk_text
 from app.services.vector_store import vector_store
+from sqlalchemy.orm import joinedload
+
+logger = logging.getLogger(__name__)
 
 
-def _to_out(k: Knowledge) -> dict:
+def _clear_answer_cache():
+    """清除答案缓存（知识更新/删除后调用，防止返回过期内容）"""
+    try:
+        from app.services.cache_service import answer_cache
+        answer_cache.clear()
+    except Exception:
+        logger.exception("[knowledge] 清除答案缓存失败")
+
+
+def _to_out(k: Knowledge, include_index_status: bool = False) -> dict:
     """转输出格式"""
-    return {
+    out = {
         "id": k.id,
         "title": k.title,
         "content": k.content,
@@ -28,16 +40,24 @@ def _to_out(k: Knowledge) -> dict:
         "created_at": k.created_at,
         "updated_at": k.updated_at,
     }
+    if include_index_status:
+        # 仅在详情页查询向量索引状态（避免列表页 N+1）
+        try:
+            chunks = vector_store.get_by_knowledge_id(k.id, limit=1)
+            out["vector_indexed"] = len(chunks) > 0
+        except Exception:
+            out["vector_indexed"] = False
+    return out
 
 
 def get_list(db, page: int = 1, page_size: int = 10, category_id: Optional[int] = None,
              tag_ids: Optional[list] = None, keyword: Optional[str] = None):
     """分页查询，支持筛选"""
-    q = db.query(Knowledge)
+    q = db.query(Knowledge).options(joinedload(Knowledge.category), joinedload(Knowledge.tags))
     if category_id:
         q = q.filter(Knowledge.category_id == category_id)
     if tag_ids:
-        q = q.join(knowledge_tags).join(Tag).filter(Tag.id.in_(tag_ids))
+        q = q.join(knowledge_tags).join(Tag).filter(Tag.id.in_(tag_ids)).distinct()
     if keyword:
         q = q.filter(Knowledge.title.like(f"%{keyword}%") | Knowledge.content.like(f"%{keyword}%"))
     total = q.count()
@@ -52,7 +72,7 @@ def get_by_id(db, id: int) -> Knowledge:
     return k
 
 
-def create(db, data: KnowledgeCreate) -> Knowledge:
+async def create(db, data: KnowledgeCreate) -> Knowledge:
     """创建知识条目 + 同步向量索引"""
     k = Knowledge(
         title=data.title,
@@ -72,14 +92,16 @@ def create(db, data: KnowledgeCreate) -> Knowledge:
         db.refresh(k)
     # 同步向量索引
     try:
-        sync_vector_index(db, k.id)
+        await sync_vector_index(db, k.id)
     except APIError:
         # 未配置 Embedding 模型时跳过
         pass
+    except Exception:
+        logger.exception(f"[create] 同步向量索引失败 knowledge_id={k.id}")
     return k
 
 
-def update(db, id: int, data: KnowledgeUpdate) -> Knowledge:
+async def update(db, id: int, data: KnowledgeUpdate) -> Knowledge:
     """更新知识条目 + 重建向量索引"""
     k = get_by_id(db, id)
     if data.title is not None:
@@ -97,9 +119,13 @@ def update(db, id: int, data: KnowledgeUpdate) -> Knowledge:
     db.refresh(k)
     # 重建向量索引
     try:
-        sync_vector_index(db, k.id)
+        await sync_vector_index(db, k.id)
     except APIError:
         pass
+    except Exception:
+        logger.exception(f"[update] 同步向量索引失败 knowledge_id={k.id}")
+    # 知识更新后清除答案缓存，防止返回过期内容
+    _clear_answer_cache()
     return k
 
 
@@ -109,15 +135,24 @@ def delete(db, id: int):
     remove_vector_index(k.id)
     db.delete(k)
     db.commit()
+    # 知识删除后清除答案缓存，防止返回过期内容
+    _clear_answer_cache()
 
 
-def upload_files(db, files: list):
+async def upload_files(db, files: list, category_id: int = None, tag_ids: list = None, auto_tag: bool = False):
     """批量上传文件，解析，创建知识条目，生成向量索引
 
     Args:
         files: FastAPI UploadFile 列表
+        category_id: 可选，指定分类
+        tag_ids: 可选，预置标签 ID 列表
+        auto_tag: 是否自动打标签（LLM 分析内容，1-3 个标签）
     """
     from app.services.file_parser import save_upload_file, parse_file, get_file_type
+
+    # 预加载现有标签
+    existing_tags = db.query(Tag).all() if (tag_ids or auto_tag) else []
+    tag_id_set = set(tag_ids or [])
 
     created = []
     for upload_file in files:
@@ -133,9 +168,10 @@ def upload_files(db, files: list):
         k = Knowledge(
             title=os.path.splitext(filename)[0],
             content=content,
-            content_type="标准文档",
+            content_type="markdown",
             source_type="upload",
             source_file=filename,
+            category_id=category_id,
         )
         db.add(k)
         db.commit()
@@ -151,13 +187,120 @@ def upload_files(db, files: list):
         db.add(doc)
         db.commit()
         db.refresh(k)
+        # 预置标签
+        if tag_id_set:
+            for t in existing_tags:
+                if t.id in tag_id_set:
+                    k.tags.append(t)
+            db.commit()
+            db.refresh(k)
+        # 自动打标签
+        if auto_tag:
+            try:
+                assigned = await _auto_tag_knowledge(db, k, content, existing_tags)
+                if assigned:
+                    db.refresh(k)
+                    # 更新本地缓存
+                    for t in assigned:
+                        if t not in existing_tags:
+                            existing_tags.append(t)
+                    logger.info(f"[upload_files] auto_tag knowledge_id={k.id} tags={[t.name for t in assigned]}")
+            except Exception:
+                logger.exception(f"[upload_files] auto_tag 失败 knowledge_id={k.id}")
         # 同步向量索引
         try:
-            sync_vector_index(db, k.id)
+            await sync_vector_index(db, k.id)
         except APIError:
             pass
+        except Exception:
+            logger.exception(f"[upload_files] 同步向量索引失败 knowledge_id={k.id}")
         created.append(k)
     return created
+
+
+async def _auto_tag_knowledge(db, knowledge, content: str, existing_tags: list):
+    """LLM 分析内容自动打标签
+
+    策略：先匹配现有标签，不够再新建。最少 1 个，最多 3 个。
+
+    Returns:
+        list[Tag]: 分配的标签列表
+    """
+    import json
+    from app.services.llm_client import ModelManager
+
+    # 截取前 2000 字避免 token 过多
+    text_preview = content[:2000] if content else ""
+    if not text_preview.strip():
+        return []
+
+    tag_names = [t.name for t in existing_tags]
+    prompt = f"""请分析以下文档内容，为其推荐 1-3 个标签。
+
+现有标签列表：{json.dumps(tag_names, ensure_ascii=False) if tag_names else "[]"}
+
+文档内容（前2000字）：
+{text_preview}
+
+要求：
+1. 优先从现有标签列表中选择匹配的标签
+2. 如果现有标签不合适，可以新建标签（简短，2-6个字）
+3. 标签总数 1-3 个
+4. 只返回标签名称，用逗号分隔，不要有其他内容
+
+示例输出：设备维护, 故障诊断, 保养
+
+标签："""
+
+    try:
+        client = ModelManager.get_active_llm()
+    except Exception:
+        logger.warning("[auto_tag] 未配置 LLM，跳过自动标签")
+        return []
+
+    try:
+        result = await client.chat([
+            {"role": "user", "content": prompt}
+        ], temperature=0.3, max_tokens=100)
+        raw = result.get("content", "").strip()
+    except Exception:
+        logger.exception("[auto_tag] LLM 调用失败")
+        return []
+
+    # 解析 LLM 返回的标签名
+    names = [n.strip() for n in raw.replace("，", ",").replace("、", ",").split(",") if n.strip()]
+    # 去重，最多 3 个
+    seen = set()
+    unique_names = []
+    for n in names:
+        if n not in seen and len(n) <= 20:
+            seen.add(n)
+            unique_names.append(n)
+    unique_names = unique_names[:3]
+    if not unique_names:
+        return []
+
+    assigned = []
+    for name in unique_names:
+        # 先匹配现有标签
+        tag = None
+        for t in existing_tags:
+            if t.name == name:
+                tag = t
+                break
+        # 不存在则新建
+        if not tag:
+            tag = Tag(name=name)
+            db.add(tag)
+            db.commit()
+            db.refresh(tag)
+            existing_tags.append(tag)
+        # 关联到知识条目（避免重复）
+        if tag not in knowledge.tags:
+            knowledge.tags.append(tag)
+        assigned.append(tag)
+    db.commit()
+    return assigned
 
 
 def batch_operation(db, data: BatchOperation):
@@ -169,9 +312,11 @@ def batch_operation(db, data: BatchOperation):
             try:
                 remove_vector_index(kid)
             except Exception:
-                pass
+                logger.exception(f"[batch_operation] 移除向量索引失败 knowledge_id={kid}")
         db.query(Knowledge).filter(Knowledge.id.in_(data.ids)).delete(synchronize_session=False)
         db.commit()
+        # 批量删除后清除答案缓存
+        _clear_answer_cache()
     elif data.action in ("add_tag", "add_tags"):
         if not data.tag_ids:
             raise APIError("请选择要添加的标签")
@@ -215,27 +360,31 @@ def get_related(db, knowledge_id: int, limit: int = 5):
     return [_to_out(item) for item in out]
 
 
-def sync_vector_index(db, knowledge_id: int):
+async def sync_vector_index(db, knowledge_id: int) -> bool:
     """同步向量索引：分块 -> Embedding -> ChromaDB.add
 
-    MVP 阶段同步调用；embedding 为 async，此处用专用事件循环执行。
+    返回 True 表示索引成功，False 表示失败或跳过。
     """
     k = db.query(Knowledge).filter(Knowledge.id == knowledge_id).first()
     if not k:
-        return
+        return False
     if not k.content or not k.content.strip():
-        return
+        return False
     # 先移除旧的
     remove_vector_index(knowledge_id)
     # 分块
     chunks = chunk_text(k.content, chunk_size=500, overlap=50)
     if not chunks:
-        return
-    # 向量化（在新事件循环中执行 async embed）
+        return False
+    # 向量化（直接 await，无需 _run_async）
     from app.services.embedding_service import embedding_service
-    embeddings = _run_async(embedding_service.embed(chunks, source="sync_index"))
+    try:
+        embeddings = await embedding_service.embed(chunks, source="sync_index")
+    except Exception:
+        logger.exception(f"[sync_vector_index] Embedding 失败 knowledge_id={knowledge_id}")
+        return False
     if not embeddings or len(embeddings) != len(chunks):
-        return
+        return False
     # metadata
     metadata = []
     for i, c in enumerate(chunks):
@@ -245,48 +394,17 @@ def sync_vector_index(db, knowledge_id: int):
             "category_id": str(k.category_id) if k.category_id else "",
             "chunk_index": i,
         })
-    vector_store.add(
-        knowledge_id=knowledge_id,
-        chunks=chunks,
-        embeddings=embeddings,
-        metadata=metadata,
-    )
-
-
-def _run_async(coro):
-    """在同步上下文中执行 coroutine，兼容已有事件循环和线程池场景"""
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # 已在事件循环中（如 FastAPI 异步上下文），需新建独立循环执行
-            import threading
-            result = {}
-            error = {}
-
-            def _run():
-                new_loop = asyncio.new_event_loop()
-                try:
-                    result["value"] = new_loop.run_until_complete(coro)
-                except Exception as e:
-                    error["exc"] = e
-                finally:
-                    new_loop.close()
-
-            t = threading.Thread(target=_run)
-            t.start()
-            t.join()
-            if "exc" in error:
-                raise error["exc"]
-            return result.get("value")
-        else:
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        # 没有事件循环（如 worker 线程），新建一个
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+        vector_store.add(
+            knowledge_id=knowledge_id,
+            chunks=chunks,
+            embeddings=embeddings,
+            metadata=metadata,
+        )
+        return True
+    except Exception:
+        logger.exception(f"[sync_vector_index] 写入 ChromaDB 失败 knowledge_id={knowledge_id}")
+        return False
 
 
 def remove_vector_index(knowledge_id: int):
@@ -294,10 +412,10 @@ def remove_vector_index(knowledge_id: int):
     try:
         vector_store.delete(knowledge_id)
     except Exception:
-        pass
+        logger.exception(f"[remove_vector_index] 移除向量索引失败 knowledge_id={knowledge_id}")
 
 
-def rebuild_all_indexes(db):
+async def rebuild_all_indexes(db):
     """重建所有知识的向量索引（用于切换 Embedding 模型后）
 
     Returns:
@@ -321,7 +439,7 @@ def rebuild_all_indexes(db):
                 skipped += 1
                 continue
             from app.services.embedding_service import embedding_service
-            embeddings = _run_async(embedding_service.embed(chunks, source="sync_index"))
+            embeddings = await embedding_service.embed(chunks, source="sync_index")
             if not embeddings or len(embeddings) != len(chunks):
                 failed += 1
                 continue
@@ -341,5 +459,6 @@ def rebuild_all_indexes(db):
             )
             success += 1
         except Exception:
+            logger.exception(f"[rebuild_all_indexes] 重建失败 knowledge_id={k.id}")
             failed += 1
     return {"total": total, "success": success, "failed": failed, "skipped": skipped}

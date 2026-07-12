@@ -10,7 +10,7 @@ export async function askQuestionStream(
   options: {
     use_cache?: boolean
     onMessage?: (chunk: string, fullText: string) => void
-    onDone?: (data: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string }) => void
+    onDone?: (data: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string; degraded?: boolean }) => void
     onError?: (error: Error) => void
     signal?: AbortSignal
   } = {}
@@ -40,7 +40,7 @@ export async function askQuestionStream(
     const decoder = new TextDecoder('utf-8')
     let buffer = ''
     let fullText = ''
-    const metaData: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string } = {}
+    const metaData: { history_id?: number; sources?: unknown[]; tokens?: number; skill_name?: string; degraded?: boolean } = {}
 
     while (true) {
       const { done, value } = await reader.read()
@@ -80,6 +80,7 @@ export async function askQuestionStream(
                 metaData.tokens = (data.token_input || 0) + (data.token_output || 0)
               }
               if (data.skill_name) metaData.skill_name = data.skill_name
+              if (data.degraded !== undefined) metaData.degraded = data.degraded
               if (data.content) {
                 fullText += data.content
                 onMessage?.(data.content, fullText)

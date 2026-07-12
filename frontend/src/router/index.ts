@@ -3,6 +3,12 @@ import MainLayout from '@/layouts/MainLayout.vue'
 
 const routes: RouteRecordRaw[] = [
   {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { title: '登录', public: true }
+  },
+  {
     path: '/',
     component: MainLayout,
     redirect: '/dashboard',
@@ -110,12 +116,47 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, _from, next) => {
+// 认证状态缓存（避免每次路由跳转都请求后端）
+let authEnabled: boolean | null = null
+
+router.beforeEach(async (to, _from, next) => {
   const title = to.meta.title as string
   if (title) {
     document.title = `${title} - MOM AI 知识库`
   }
+
+  // 登录页和公开页面直接放行
+  if (to.meta.public || to.path === '/login') {
+    next()
+    return
+  }
+
+  // 首次访问时检查后端是否启用了认证
+  if (authEnabled === null) {
+    try {
+      const { getAuthStatus } = await import('@/api/auth')
+      const status = await getAuthStatus()
+      authEnabled = status.auth_enabled
+    } catch {
+      authEnabled = false
+    }
+  }
+
+  // 认证启用时检查 token
+  if (authEnabled) {
+    const token = localStorage.getItem('token')
+    if (!token) {
+      next({ path: '/login', query: { redirect: to.fullPath } })
+      return
+    }
+  }
+
   next()
 })
+
+/** 重置认证状态缓存（登出或 401 时调用） */
+export function resetAuthCache(): void {
+  authEnabled = null
+}
 
 export default router

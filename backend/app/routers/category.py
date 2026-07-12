@@ -6,8 +6,9 @@ from app.database import get_db
 from app.models import Category, Knowledge
 from app.schemas.knowledge import CategoryCreate, CategoryOut
 from app.utils.response import success, APIError
+from app.utils.auth import require_auth
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 def _build_tree(categories: list, parent_id=None) -> list:

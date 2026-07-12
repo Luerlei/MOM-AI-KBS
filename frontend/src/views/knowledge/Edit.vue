@@ -5,7 +5,13 @@
         <span>{{ isEdit ? '编辑知识' : '新建知识' }}</span>
       </template>
       <template #extra>
-        <a-button @click="$router.back()">返回</a-button>
+        <a-space>
+          <a-button @click="$router.back()">返回</a-button>
+          <a-button @click="$router.back()">取消</a-button>
+          <a-button type="primary" :loading="saving" @click="handleSave">
+            {{ isEdit ? '保存修改' : '创建' }}
+          </a-button>
+        </a-space>
       </template>
 
       <a-form
@@ -94,14 +100,6 @@
           </a-list>
         </a-card>
 
-        <div class="form-actions">
-          <a-space>
-            <a-button @click="$router.back()">取消</a-button>
-            <a-button type="primary" :loading="saving" @click="handleSave">
-              {{ isEdit ? '保存修改' : '创建' }}
-            </a-button>
-          </a-space>
-        </div>
       </a-form>
     </a-card>
   </div>
@@ -191,9 +189,9 @@ async function fetchTags(): Promise<void> {
   }
 }
 
-async function onCreateTag(name: string): Promise<void> {
+async function onCreateTag(name: string, color?: string): Promise<void> {
   try {
-    const tag = await createTag({ name })
+    const tag = await createTag({ name, color })
     tags.value.push(tag)
     form.value.tag_ids.push(tag.id)
     message.success(`标签「${name}」已创建`)
@@ -262,12 +260,5 @@ onMounted(() => {
 .knowledge-edit {
   max-width: 1200px;
   margin: 0 auto;
-}
-
-.form-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 16px;
-  border-top: 1px solid #f0f0f0;
 }
 </style>

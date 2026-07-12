@@ -48,11 +48,23 @@ export function deleteKnowledge(id: number): Promise<void> {
 /**
  * 批量上传文件
  */
-export function uploadKnowledgeFiles(files: File[]): Promise<ApiResponse> {
+export function uploadKnowledgeFiles(
+  files: File[],
+  options?: { category_id?: number | null; tag_ids?: number[]; auto_tag?: boolean }
+): Promise<ApiResponse> {
   const formData = new FormData()
   files.forEach((file) => {
     formData.append('files', file)
   })
+  if (options?.category_id) {
+    formData.append('category_id', String(options.category_id))
+  }
+  if (options?.tag_ids?.length) {
+    formData.append('tag_ids', options.tag_ids.join(','))
+  }
+  if (options?.auto_tag) {
+    formData.append('auto_tag', 'true')
+  }
   return upload<ApiResponse>('/knowledge/upload', formData)
 }
 

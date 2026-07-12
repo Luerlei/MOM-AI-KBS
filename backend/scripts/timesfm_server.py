@@ -29,6 +29,7 @@ from pydantic import BaseModel
 # 模型懒加载（启动时加载一次）
 _model = None
 _model_id = "google/timesfm-2.5-200m-pytorch"
+_device = "cpu"
 
 
 class PredictRequest(BaseModel):
@@ -62,8 +63,8 @@ def get_model():
         )
         print(f"[timesfm] 模型已下载到: {local_path}")
 
-        # 从本地路径加载模型
-        _model = TimesFM_2p5_200M_torch.from_pretrained(local_path)
+        # 从本地路径加载模型（传入 device 支持 GPU 加速）
+        _model = TimesFM_2p5_200M_torch.from_pretrained(local_path, device=_device)
         # TimesFM 2.5 要求先 compile 才能预测
         forecast_config = ForecastConfig(
             max_context=512,      # 最大上下文长度
@@ -71,7 +72,7 @@ def get_model():
             per_core_batch_size=32,
         )
         _model.compile(forecast_config=forecast_config)
-        print(f"[timesfm] 模型已加载并编译")
+        print(f"[timesfm] 模型已加载并编译 (device={_device})")
     return _model
 
 
@@ -138,6 +139,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     _model_id = args.model
+    _device = args.device
 
     import uvicorn
     print(f"[timesfm] 启动服务: http://0.0.0.0:{args.port}")

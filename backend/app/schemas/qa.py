@@ -29,7 +29,7 @@ class QAResponse(BaseModel):
 
 class QAFeedback(BaseModel):
     history_id: int
-    feedback: int  # 1=useful, -1=useless
+    feedback: str  # "useful" / "useless"，内部转为 1 / -1
 
 
 class QAHistoryOut(BaseModel):
@@ -70,6 +70,7 @@ class SearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
+    id: Optional[int] = None
     knowledge_id: int
     title: str
     snippet: str = ""
@@ -77,3 +78,4 @@ class SearchResult(BaseModel):
     content_type: str = ""
     category_name: Optional[str] = None
     tag_names: List[str] = []
+    tags: List[dict] = []

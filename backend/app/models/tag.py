@@ -9,3 +9,4 @@ class Tag(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False, unique=True, comment="标签名")
+    color = Column(String(20), nullable=True, default=None, comment="标签颜色")

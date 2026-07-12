@@ -1,7 +1,7 @@
 <template>
   <div class="qa-page">
     <!-- 对话区域 -->
-    <div class="chat-area" ref="chatAreaRef">
+    <div class="chat-area" ref="chatAreaRef" @click="onChatClick">
       <div class="chat-inner">
         <a-empty
           v-if="messages.length === 0"
@@ -29,7 +29,7 @@
                 <div
                   class="msg-text markdown-body"
                   :class="{ 'typing-cursor': msg.streaming }"
-                  v-html="renderMarkdown(msg.content)"
+                  v-html="renderAnswer(msg.content, msg.sources)"
                 ></div>
                 <!-- 来源引用 -->
                 <div v-if="msg.sources && msg.sources.length > 0" class="msg-sources">
@@ -37,17 +37,26 @@
                     <LinkOutlined /> 参考来源：
                   </div>
                   <div class="sources-list">
-                    <a
+                    <div
                       v-for="(src, sidx) in msg.sources"
                       :key="sidx"
-                      class="source-item"
+                      class="source-card"
                       @click="goKnowledge(src.knowledge_id)"
                     >
-                      <a-tag color="blue">
-                        {{ sidx + 1 }}. {{ src.title }}
-                      </a-tag>
-                    </a>
+                      <div class="source-header">
+                        <span class="source-num">{{ sidx + 1 }}</span>
+                        <span class="source-title-text">{{ src.title }}</span>
+                        <span v-if="src.score != null" class="source-score" :class="scoreClass(src.score)">
+                          {{ (src.score * 100).toFixed(0) }}%
+                        </span>
+                      </div>
+                      <div v-if="src.snippet" class="source-snippet">{{ src.snippet }}</div>
+                    </div>
                   </div>
+                </div>
+                <!-- 降级模式提示 -->
+                <div v-if="!msg.streaming && msg.degraded" class="msg-degraded">
+                  <WarningOutlined /> 当前为降级模式（未配置 Embedding 模型），仅使用关键词检索，检索质量可能下降
                 </div>
                 <!-- Skill & Token -->
                 <div v-if="!msg.streaming" class="msg-meta">
@@ -142,7 +151,8 @@ import {
   DislikeOutlined,
   LinkOutlined,
   ThunderboltOutlined,
-  BulbOutlined
+  BulbOutlined,
+  WarningOutlined
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import MarkdownIt from 'markdown-it'
@@ -161,6 +171,7 @@ interface ChatMessage {
   skill_name?: string
   total_tokens?: number
   feedback?: 'useful' | 'useless' | null
+  degraded?: boolean
 }
 
 const messages = ref<ChatMessage[]>([])
@@ -173,6 +184,41 @@ let abortController: AbortController | null = null
 function renderMarkdown(text: string): string {
   if (!text) return ''
   return md.render(text)
+}
+
+function renderAnswer(text: string, sources?: QAReference[]): string {
+  if (!text) return ''
+  let html = md.render(text)
+  // 将 [1] [2] 等角标替换为可点击的徽标
+  if (sources && sources.length > 0) {
+    html = html.replace(/\[(\d+)\]/g, (match, numStr) => {
+      const num = parseInt(numStr)
+      if (num >= 1 && num <= sources.length) {
+        const src = sources[num - 1]
+        // 转义 title 中的特殊字符，防止 XSS 和 HTML 属性注入
+        const safeTitle = escapeHtml(src.title || '')
+        const safeKid = encodeURIComponent(String(src.knowledge_id || ''))
+        return `<a class="cite-badge" data-kid="${safeKid}" title="${safeTitle}">[${num}]</a>`
+      }
+      return match
+    })
+  }
+  return html
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function scoreClass(score: number): string {
+  if (score >= 0.75) return 'score-high'
+  if (score >= 0.5) return 'score-mid'
+  return 'score-low'
 }
 
 async function onSend(): Promise<void> {
@@ -209,6 +255,7 @@ async function onSend(): Promise<void> {
       if (data.history_id) aiMsg.history_id = data.history_id
       if (data.sources) aiMsg.sources = data.sources as QAReference[]
       if (data.tokens) aiMsg.total_tokens = data.tokens
+      if (data.degraded) aiMsg.degraded = true
       streaming.value = false
       loadSuggestions(q)
     },
@@ -259,6 +306,14 @@ async function onFeedback(msg: ChatMessage, feedback: 'useful' | 'useless'): Pro
 
 function goKnowledge(id: number): void {
   router.push(`/knowledge/detail/${id}`)
+}
+
+function onChatClick(e: MouseEvent): void {
+  const target = e.target as HTMLElement
+  if (target.classList.contains('cite-badge')) {
+    const kid = parseInt(target.getAttribute('data-kid') || '0')
+    if (kid) goKnowledge(kid)
+  }
 }
 
 async function scrollToBottom(): Promise<void> {
@@ -352,12 +407,90 @@ onMounted(() => {
 
 .sources-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.source-item {
+.source-card {
+  padding: 8px 10px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
   cursor: pointer;
+  transition: all 0.2s;
+}
+
+.source-card:hover {
+  background: #f0f7ff;
+  border-color: #91caff;
+}
+
+.source-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #1677ff;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.source-title-text {
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.85);
+  font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-score {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.score-high {
+  background: #f6ffed;
+  color: #52c41a;
+  border: 1px solid #b7eb8f;
+}
+
+.score-mid {
+  background: #fff7e6;
+  color: #fa8c16;
+  border: 1px solid #ffd591;
+}
+
+.score-low {
+  background: #fff2f0;
+  color: #ff4d4f;
+  border: 1px solid #ffccc7;
+}
+
+.source-snippet {
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.55);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .msg-meta {
@@ -366,6 +499,19 @@ onMounted(() => {
   color: rgba(0, 0, 0, 0.45);
   display: flex;
   gap: 16px;
+}
+
+.msg-degraded {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #d46b08;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .msg-feedback {
@@ -435,5 +581,31 @@ onMounted(() => {
 :deep(.ai-bubble .markdown-body pre) {
   background: #1f1f1f;
   color: #f0f0f0;
+}
+
+:deep(.ai-bubble .markdown-body .cite-badge) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  margin: 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: #1677ff;
+  background: #e6f4ff;
+  border: 1px solid #91caff;
+  border-radius: 3px;
+  cursor: pointer;
+  text-decoration: none;
+  vertical-align: super;
+  transition: all 0.15s;
+}
+
+:deep(.ai-bubble .markdown-body .cite-badge:hover) {
+  background: #1677ff;
+  color: #fff;
 }
 </style>

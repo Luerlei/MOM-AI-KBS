@@ -24,6 +24,7 @@ class ForecastTask(Base):
     duration_ms = Column(Integer, default=0, comment="耗时(毫秒)")
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
     completed_at = Column(String, default="", comment="完成时间")
+    is_internal = Column(Integer, default=0, comment="内部任务标记: 0=用户发起, 1=交叉验证/模型对比等内部回测")
 
 
 class ForecastResult(Base):
