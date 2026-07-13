@@ -396,7 +396,7 @@
                 <a-dropdown>
                   <a-button type="link" size="small" :disabled="record.status !== 'success'">导出</a-button>
                   <template #overlay>
-                    <a-menu @click="(e) => onExportTask(record, e.key)">
+                    <a-menu @click="onExportTaskMenuClick($event, record)">
                       <a-menu-item key="excel">Excel</a-menu-item>
                       <a-menu-item key="csv">CSV</a-menu-item>
                     </a-menu>
@@ -711,7 +711,7 @@ import {
   FileTextOutlined, FieldTimeOutlined,
   VerticalAlignTopOutlined, VerticalAlignBottomOutlined, AimOutlined,
   ExperimentOutlined, BarChartOutlined,
-  TrophyOutlined, BlockOutlined, FunctionOutlined, WarningOutlined, TuningOutlined,
+  TrophyOutlined, BlockOutlined, FunctionOutlined, WarningOutlined, ToolOutlined,
 } from '@ant-design/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '@/stores/app'
@@ -1216,6 +1216,13 @@ async function onViewTask(record: ForecastTask): Promise<void> {
 function onExportTask(record: ForecastTask, format: 'excel' | 'csv'): void {
   const url = exportForecastResultUrl(record.id, format)
   window.open(url, '_blank')
+}
+
+function onExportTaskMenuClick(info: { key: string | number }, record: ForecastTask): void {
+  const key = String(info.key)
+  if (key === 'excel' || key === 'csv') {
+    onExportTask(record, key)
+  }
 }
 
 // ===== 图表渲染 =====

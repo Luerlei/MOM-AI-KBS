@@ -237,6 +237,14 @@ import type {
 } from '@/types'
 import type { TableColumnsType } from 'ant-design-vue'
 
+type PreviewColumn = {
+  title: string
+  dataIndex: string
+  key: string
+  width: number
+  ellipsis?: boolean
+}
+
 const route = useRoute()
 const router = useRouter()
 
@@ -267,7 +275,7 @@ const valueColumns: TableColumnsType = [
 ]
 
 // 预览矩阵列（动态）
-const previewColumns = ref<TableColumnsType>([])
+const previewColumns = ref<PreviewColumn[]>([])
 
 // 新增/编辑
 const showEditModal = ref(false)
@@ -467,7 +475,7 @@ async function onPreview() {
     const res = await previewCovariates(datasetId.value)
     previewData.value = res
     // 动态构建表格列
-    previewColumns.value = (res.columns || []).map(c => ({
+    previewColumns.value = (res.columns || []).map((c: { title: string; key: string }) => ({
       title: c.title,
       dataIndex: c.key,
       key: c.key,

@@ -27,7 +27,7 @@
             <a-dropdown :trigger="['click']">
               <a class="node-action" @click.stop>...</a>
               <template #overlay>
-                <a-menu @click="(info) => onMenuClick(info.key, node)">
+                <a-menu @click="onNodeMenuClick($event, node)">
                   <a-menu-item key="add">新建子分类</a-menu-item>
                   <a-menu-item key="edit">重命名</a-menu-item>
                   <a-menu-item key="delete">删除</a-menu-item>
@@ -216,6 +216,10 @@ function onMenuClick(key: string, node: Category): void {
       }
     })
   }
+}
+
+function onNodeMenuClick(info: { key: string | number }, node: Category): void {
+  onMenuClick(String(info.key), node)
 }
 </script>
 

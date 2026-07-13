@@ -1,6 +1,6 @@
 # MOM 系统 AI 知识库平台 — 设计书
 
-> **版本**：v0.5 | **更新日期**：2026-07-12 | **状态**：活跃维护中
+> **版本**：v0.6 | **更新日期**：2026-07-12 | **状态**：活跃维护中
 
 ---
 
@@ -15,9 +15,11 @@
 - [7. 前端设计](#7-前端设计)
 - [8. 核心业务流程](#8-核心业务流程)
 - [9. 时序预测模块](#9-时序预测模块)
-- [10. 安全设计](#10-安全设计)
-- [11. 配置与部署](#11-配置与部署)
-- [12. 版本演进](#12-版本演进)
+- [10. 协变量系统（v0.6 新增）](#10-协变量系统v06-新增)
+- [11. 知识状态生命周期（v0.6 新增）](#11-知识状态生命周期v06-新增)
+- [12. 安全设计](#12-安全设计)
+- [13. 配置与部署](#13-配置与部署)
+- [14. 版本演进](#14-版本演进)
 
 ---
 
@@ -31,10 +33,10 @@
 
 | 能力域 | 说明 |
 |--------|------|
-| 知识管理 | 多格式文件上传解析（PDF/DOCX/XLSX/MD）、Markdown 编辑、分类标签体系、向量索引 |
+| 知识管理 | 多格式文件上传解析（PDF/DOCX/XLSX/MD）、Markdown 编辑、分类标签体系、向量索引、**状态生命周期管理（v0.6）** |
 | 智能问答 | Skill 路由三级匹配 + 自实现轻量 RAG + SSE 流式输出 + 问答缓存 |
 | 语义搜索 | 向量检索 + BM25 关键词检索 + RRF 融合排序 |
-| 时序预测 | Chronos-2 / TimesFM 深度学习模型 + ARIMA/ETS/Theta 统计模型 + STL 分解 + 交叉验证 |
+| 时序预测 | Chronos-2 / TimesFM 深度学习模型 + ARIMA/ETS/Theta/Prophet 统计模型 + **协变量外生变量支持（v0.6）** + STL 分解 + 交叉验证 |
 | 模型管理 | LLM / Embedding / Forecast 三类模型配置、运行时热更新、调用日志全量收集 |
 | 认证授权 | JWT 可选认证、开发环境关闭、生产环境强制开启 |
 
@@ -45,6 +47,7 @@
 - **优雅降级**：无 Embedding 时 RAG 降级为直接对话；无 LLM 时预测分析回退为模板化摘要
 - **运行时热更新**：模型配置存储于数据库，Web 界面修改后立即生效
 - **安全第一**：API Key 加密存储、文件名防路径穿越、HTML 内容 DOMPurify 净化
+- **审计可追溯**：知识状态变更全量记录审计日志（v0.6）
 
 ---
 
@@ -53,30 +56,31 @@
 ### 2.1 整体架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    前端 (Vue 3 + Vite)                     │
-│  Ant Design Vue 4.x  |  Pinia  |  Vue Router  |  ECharts  │
-│  16 个页面  |  7 个组件  |  13 个 API 模块  |  SSE 流式     │
-└────────────────────────┬────────────────────────────────┘
-                         │ HTTP / SSE  (Vite proxy → :8000)
-┌────────────────────────┴────────────────────────────────┐
-│                  后端 (FastAPI + Python 3.9)              │
-│  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐ │
-│  │ 13 路由  │→ │ 18 服务  │→ │   数据访问层 (SQLAlchemy) │ │
-│  │ /api/*   │  │ 业务逻辑 │  │  SQLite + ChromaDB     │ │
-│  └──────────┘  └────┬─────┘  └────────────────────────┘ │
-│                       │                                   │
-│  ┌────────────────────┴────────────────────────────────┐ │
-│  │              模型抽象层 (LLMClient)                  │ │
-│  │  OpenAICompatibleClient  |  ForecastClient           │ │
-│  └───────┬───────────────────────────┬────────────────┘ │
-│          │ httpx                     │ httpx             │
-│  ┌───────┴───────────┐     ┌────────┴─────────────────┐  │
-│  │ 外部 LLM / Embedding│     │ Forecast 推理服务        │  │
-│  │ (OpenAI/MiMo/Qwen) │     │ (Chronos :8501/8503)    │  │
-│  └────────────────────┘     │ (TimesFM  :8502)        │  │
-│                              └──────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    前端 (Vue 3 + Vite)                       │
+│  Ant Design Vue 4.x  |  Pinia  |  Vue Router  |  ECharts    │
+│  17 个页面  |  7 个组件  |  14 个 API 模块  |  SSE 流式       │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ HTTP / SSE  (Vite proxy → :8000)
+┌─────────────────────────┴───────────────────────────────────┐
+│                  后端 (FastAPI + Python 3.9)                │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────────────────┐ │
+│  │ 14 路由  │→ │ 19 服务  │→ │   数据访问层 (SQLAlchemy)   │ │
+│  │ /api/*   │  │ 业务逻辑 │  │  SQLite + ChromaDB        │ │
+│  └──────────┘  └────┬─────┘  └───────────────────────────┘ │
+│                       │                                     │
+│  ┌────────────────────┴───────────────────────────────────┐ │
+│  │              模型抽象层 (LLMClient)                      │ │
+│  │  OpenAICompatibleClient  |  ForecastClient               │ │
+│  └───────┬───────────────────────────┬─────────────────────┘ │
+│          │ httpx                     │ httpx                  │
+│  ┌───────┴────────────┐     ┌────────┴────────────────────┐  │
+│  │ 外部 LLM / Embedding│     │ Forecast 推理服务           │  │
+│  │ (OpenAI/MiMo/Qwen) │     │ (Chronos :8501/8503)       │  │
+│  └────────────────────┘     │ (TimesFM  :8502)           │  │
+│                              │ (Prophet 内置 statsmodels) │  │
+│                              └────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 分层架构
@@ -85,13 +89,14 @@
 表现层    │ Vue 3 页面 + 组件 + 路由
          │ 统一 API 封装（axios + 拦截器 + SSE）
 ──────────┼────────────────────────────────
-接口层    │ FastAPI 路由（13 个模块）
+接口层    │ FastAPI 路由（14 个模块）
          │ JWT 认证依赖 + 统一响应格式 + 全局异常处理
 ──────────┼────────────────────────────────
-业务层    │ 18 个 Service
+业务层    │ 19 个 Service
          │ RAG / Skill路由 / 缓存 / 向量存储 / 预测 / 文件解析
+         │ 协变量管理 / 知识状态审计（v0.6 新增）
 ──────────┼────────────────────────────────
-数据层    │ SQLAlchemy ORM（13 模型）+ ChromaDB（向量）
+数据层    │ SQLAlchemy ORM（15 模型）+ ChromaDB（向量）
          │ SQLite 持久化 + 自动迁移
 ──────────┼────────────────────────────────
 抽象层    │ LLMClient / OpenAICompatibleClient / ForecastClient
@@ -117,7 +122,9 @@
 | PyPDF2 | 3.0.1 | PDF 解析 |
 | python-docx | 1.1.2 | DOCX 解析 |
 | openpyxl | 3.1.5 | Excel 解析 |
-| statsmodels | — | ARIMA / ETS / STL |
+| statsmodels | — | ARIMA / ETS / Theta / STL |
+| prophet | — | Prophet 时序预测（v0.6 接入协变量） |
+| numpy | — | 协变量矩阵运算（v0.6） |
 | pydantic | 2.10.4 | 数据校验 |
 
 ### 3.2 前端
@@ -143,6 +150,7 @@
 | Chronos-T5-Small | 8501 | 轻量预测 |
 | TimesFM-2.5 | 8502 | Google 时序模型 |
 | Chronos-T5-Large | 8503 | 高精度预测 |
+| Prophet | 内置 | 可加季节性 + 协变量（v0.6） |
 
 ---
 
@@ -152,14 +160,17 @@
 LLM Wiki/
 ├── backend/                          # 后端服务
 │   ├── app/
-│   │   ├── main.py                   # FastAPI 入口（路由注册/中间件/生命周期）
+│   │   ├── main.py                   # FastAPI 入口（14 个路由注册）
 │   │   ├── config.py                 # 配置管理（环境变量 + 安全校验）
 │   │   ├── database.py               # 数据库初始化 + 自动迁移
-│   │   ├── models/                   # 13 个数据模型
-│   │   │   ├── __init__.py           # 模型导出
+│   │   ├── data/                     # ★ v0.6 新增：静态数据
+│   │   │   └── china_holidays.json   #   中国节假日数据集（2024-2026）
+│   │   ├── models/                   # 15 个数据模型
+│   │   │   ├── __init__.py
 │   │   │   ├── category.py           # 分类（树形）
 │   │   │   ├── tag.py                # 标签
-│   │   │   ├── knowledge.py          # 知识 + KnowledgeTag 关联
+│   │   │   ├── knowledge.py          # 知识 + status 字段 ★
+│   │   │   ├── knowledge_status_log.py # ★ v0.6 新增：状态审计日志
 │   │   │   ├── document.py           # 上传文档
 │   │   │   ├── skill.py              # Skill 路由配置
 │   │   │   ├── skill_option.py       # Skill 分类/功能选项
@@ -168,12 +179,13 @@ LLM Wiki/
 │   │   │   ├── token_usage.py        # Token 消耗记录
 │   │   │   ├── search_history.py     # 搜索历史
 │   │   │   ├── dataset.py            # 时序数据集
-│   │   │   └── forecast_task.py      # 预测任务 + 结果
-│   │   ├── routers/                  # 13 个 API 路由模块
+│   │   │   ├── forecast_task.py      # 预测任务 + 结果
+│   │   │   └── covariate.py          # ★ v0.6 新增：协变量
+│   │   ├── routers/                  # 14 个 API 路由模块
 │   │   │   ├── auth.py               # 认证
-│   │   │   ├── knowledge.py          # 知识管理
+│   │   │   ├── knowledge.py          # 知识管理（含状态审计端点）★
 │   │   │   ├── category.py           # 分类管理
-│   │   │   ├── tag.py                 # 标签管理
+│   │   │   ├── tag.py                # 标签管理
 │   │   │   ├── skill.py              # Skill 管理
 │   │   │   ├── skill_option.py       # Skill 选项
 │   │   │   ├── model_config.py       # 模型配置
@@ -182,9 +194,10 @@ LLM Wiki/
 │   │   │   ├── dashboard.py          # 仪表盘
 │   │   │   ├── token_stats.py        # Token 统计
 │   │   │   ├── dataset.py            # 数据集管理
-│   │   │   └── forecast.py           # 时序预测
+│   │   │   ├── forecast.py           # 时序预测（含协变量支持）★
+│   │   │   └── covariate.py          # ★ v0.6 新增：协变量管理
 │   │   ├── schemas/                  # Pydantic 验证模型
-│   │   ├── services/                 # 18 个业务服务
+│   │   ├── services/                 # 19 个业务服务
 │   │   │   ├── llm_client.py         # LLM 客户端抽象层 ★
 │   │   │   ├── rag_service.py        # RAG 检索增强 ★
 │   │   │   ├── qa_service.py         # 问答服务（含缓存）★
@@ -192,9 +205,10 @@ LLM Wiki/
 │   │   │   ├── cache_service.py      # 向量相似度缓存
 │   │   │   ├── vector_store.py       # ChromaDB 封装 ★
 │   │   │   ├── embedding_service.py  # Embedding 服务
-│   │   │   ├── forecast_service.py   # 时序预测（1850 行）★
+│   │   │   ├── forecast_service.py   # 时序预测（含协变量接入）★
+│   │   │   ├── covariate_service.py  # ★ v0.6 新增：协变量管理
 │   │   │   ├── dataset_service.py    # 数据集管理
-│   │   │   ├── knowledge_service.py  # 知识管理 + 索引同步
+│   │   │   ├── knowledge_service.py  # 知识管理 + 状态审计 + 索引同步 ★
 │   │   │   ├── search_service.py     # 语义 + 关键词搜索
 │   │   │   ├── prompt_assembler.py   # Prompt 组装
 │   │   │   ├── file_parser.py        # 文件解析
@@ -222,9 +236,9 @@ LLM Wiki/
 │   ├── src/
 │   │   ├── main.ts                   # 入口
 │   │   ├── App.vue                   # 根组件
-│   │   ├── router/index.ts           # 路由配置（17 条路由）
+│   │   ├── router/index.ts           # 路由配置（18 条路由）★
 │   │   ├── stores/app.ts             # Pinia 状态管理
-│   │   ├── api/                      # 13 个 API 模块
+│   │   ├── api/                      # 14 个 API 模块
 │   │   │   ├── request.ts            # axios 封装（拦截器/401处理）
 │   │   │   ├── auth.ts              # 认证
 │   │   │   ├── knowledge.ts          # 知识
@@ -236,8 +250,9 @@ LLM Wiki/
 │   │   │   ├── qa.ts                # 问答（含 SSE 流式）
 │   │   │   ├── dashboard.ts         # 仪表盘统计
 │   │   │   ├── dataset.ts           # 数据集
-│   │   │   └── forecast.ts           # 时序预测
-│   │   ├── types/index.ts            # TypeScript 类型定义
+│   │   │   ├── forecast.ts           # 时序预测
+│   │   │   └── covariate.ts         # ★ v0.6 新增：协变量 API
+│   │   ├── types/index.ts            # TypeScript 类型定义（含 v0.6 新增类型）★
 │   │   ├── layouts/
 │   │   │   └── MainLayout.vue        # 主布局（侧边栏/顶栏/面包屑）
 │   │   ├── components/               # 7 个通用组件
@@ -248,7 +263,7 @@ LLM Wiki/
 │   │   │   ├── MarkdownView.vue      # Markdown 渲染
 │   │   │   ├── SkillOptionManager.vue # Skill 选项管理
 │   │   │   └── TagSelect.vue         # 标签选择器
-│   │   └── views/                    # 16 个页面
+│   │   └── views/                    # 17 个页面
 │   │       ├── Login.vue             # 登录
 │   │       ├── Dashboard.vue         # 仪表盘
 │   │       ├── ModelConfig.vue       # 模型配置
@@ -258,10 +273,12 @@ LLM Wiki/
 │   │       ├── TokenStats.vue        # Token 统计
 │   │       ├── CallLogs.vue          # 调用日志
 │   │       ├── Trends.vue            # 趋势分析 ★
-│   │       ├── knowledge/{List,Detail,Edit,Upload}.vue
+│   │       ├── knowledge/{List,Detail,Edit,Upload}.vue  # 含状态管理 ★
 │   │       ├── skill/{List,Edit}.vue
-│   │       └── dataset/List.vue
-│   ├── tests/                        # 51 个测试用例
+│   │       └── dataset/
+│   │           ├── List.vue          # 数据集列表
+│   │           └── Covariates.vue    # ★ v0.6 新增：协变量管理
+│   ├── tests/                        # 单元测试
 │   └── package.json
 ├── docs/                             # 文档目录
 │   ├── DESIGN.md                     # 本设计书
@@ -285,17 +302,17 @@ LLM Wiki/
 │ (分类树)    │     │ (知识)    │     │   (标签)      │
 └───────────┘     └─────┬─────┘     └──────────────┘
                         │1
-                        │
-                  ┌─────*─────┐
-                  │ Document   │
-                  │ (上传文档)  │
-                  └───────────┘
+            ┌───────────┼───────────┐
+            │1          │1          │
+   ┌────────*─────┐  ┌──*──────────┐
+   │ Document     │  │KnowledgeStatusLog│ ★ v0.6
+   │ (上传文档)    │  │ (状态审计日志)    │
+   └─────────────┘  └─────────────────┘
 
 ┌───────────┐     ┌──────────────┐     ┌───────────┐
 │ Skill       │1---*│ QAHistory     │1---*│ TokenUsage  │
 │ (技能路由)  │     │ (问答历史)    │     │ (Token消耗) │
 └─────┬─────┘     └──────────────┘     └───────────┘
-      │
       │1
 ┌─────*──────┐
 │SkillOption  │
@@ -305,13 +322,12 @@ LLM Wiki/
 ┌───────────┐     ┌──────────────┐     ┌──────────────┐
 │ModelConfig  │     │  Dataset      │1---*│ ForecastTask │
 │(模型配置)   │     │ (时序数据集)  │     │ (预测任务)    │
-└─────┬─────┘     └──────────────┘     └──────┬──────┘
-      │                                        │1
-      │                                        │
-      └──────────────────────────────────┌────*──────┐
-                                          │ForecastResult│
-                                          │ (预测结果)    │
-                                          └─────────────┘
+└─────┬─────┘     └──────┬───────┘     └──────┬──────┘
+      │                  │1                    │1
+      │          ┌───────*────────┐     ┌────*──────┐
+      └──────────┤ DatasetCovariate│     │ForecastResult│
+                 │ (协变量) ★ v0.6 │     │ (预测结果)    │
+                 └────────────────┘     └─────────────┘
 
 ┌──────────────┐
 │SearchHistory  │  (独立表)
@@ -319,63 +335,85 @@ LLM Wiki/
 └──────────────┘
 ```
 
-### 5.2 模型清单（13 个）
+### 5.2 模型清单（15 个，v0.6 新增 2 个）
 
-| # | 模型 | 表名 | 说明 |
-|---|------|------|------|
-| 1 | Category | categories | 分类，自引用树形结构 |
-| 2 | Tag | tags | 标签，含颜色 |
-| 3 | Knowledge | knowledge | 知识条目，含 Markdown 内容 |
-| 4 | KnowledgeTag | knowledge_tag_relation | 知识-标签多对多关联 |
-| 5 | Document | documents | 上传文件记录 |
-| 6 | Skill | skills | Skill 路由配置 |
-| 7 | SkillOption | skill_options | Skill 分类/功能选项 |
-| 8 | ModelConfig | model_configs | 模型配置（LLM/Embedding/Forecast） |
-| 9 | QAHistory | qa_history | 问答历史 |
-| 10 | TokenUsage | token_usage | Token 消耗记录 |
-| 11 | SearchHistory | search_history | 搜索历史 |
-| 12 | Dataset | datasets | 时序数据集 |
-| 13 | ForecastTask + ForecastResult | forecast_tasks / forecast_results | 预测任务和结果 |
+| # | 模型 | 表名 | 说明 | 版本 |
+|---|------|------|------|------|
+| 1 | Category | categories | 分类，自引用树形结构 | |
+| 2 | Tag | tags | 标签，含颜色 | |
+| 3 | Knowledge | knowledge | 知识条目，**含 status 字段** | v0.6 增强 |
+| 4 | KnowledgeTag | knowledge_tag_relation | 知识-标签多对多关联 | |
+| 5 | KnowledgeStatusLog | knowledge_status_log | **知识状态变更审计日志** | ★ v0.6 新增 |
+| 6 | Document | documents | 上传文件记录 | |
+| 7 | Skill | skills | Skill 路由配置 | |
+| 8 | SkillOption | skill_options | Skill 分类/功能选项 | |
+| 9 | ModelConfig | model_configs | 模型配置（LLM/Embedding/Forecast） | |
+| 10 | QAHistory | qa_history | 问答历史 | |
+| 11 | TokenUsage | token_usage | Token 消耗记录 | |
+| 12 | SearchHistory | search_history | 搜索历史 | |
+| 13 | Dataset | datasets | 时序数据集 | |
+| 14 | ForecastTask + ForecastResult | forecast_tasks / forecast_results | 预测任务和结果 | |
+| 15 | DatasetCovariate | dataset_covariates | **数据集协变量（外生变量）** | ★ v0.6 新增 |
 
 ### 5.3 关键字段说明
+
+#### Knowledge（v0.6 增强状态字段）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer PK | 主键 |
+| title | String(200) | 标题 |
+| content | Text | 内容（Markdown） |
+| content_type | String(50) | 内容格式 |
+| category_id | Integer FK | 分类 |
+| source_type | String(20) | 来源 |
+| **status** | String(20) | **状态：draft/published/archived（v0.6 新增，默认 published）** |
+| created_at / updated_at | String | 时间戳 |
+
+#### DatasetCovariate（★ v0.6 新增）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer PK | 主键 |
+| dataset_id | Integer FK | 关联数据集 |
+| name | String(100) | 协变量名称（如"节假日"） |
+| code | String(50) | 英文标识（如 `is_holiday`），用作 exog 列名 |
+| type | String(20) | 类型：continuous / binary / categorical |
+| source_type | String(20) | 来源：manual / auto / template |
+| values_json | Text | JSON 格式值 `[{"time":"2024-01","value":1}]` |
+| description | String(500) | 备注说明 |
+| created_at / updated_at | String | 时间戳 |
+
+#### KnowledgeStatusLog（★ v0.6 新增）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer PK | 主键 |
+| knowledge_id | Integer FK | 知识 ID |
+| knowledge_title | String(500) | 标题快照 |
+| old_status | String(20) | 旧状态 |
+| new_status | String(20) | 新状态 |
+| operator | String(100) | 操作人（默认 system） |
+| reason | Text | 变更原因（可选） |
+| created_at | String | 变更时间 |
 
 #### ModelConfig（模型配置）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | Integer PK | 主键 |
-| name | String(100) | 配置名称 |
 | type | String(20) | 模型类型：LLM / Embedding / Forecast |
-| api_url | String(500) | API 地址（base URL） |
+| api_url | String(500) | API 地址 |
 | api_key | String(500) | API Key（Fernet 加密存储） |
-| model_name | String(100) | 模型名称 |
 | is_active | Boolean | 是否启用（同类型仅一个） |
-| input_price | Float | 输入 token 单价（元/千 token） |
-| output_price | Float | 输出 token 单价（元/千 token） |
-
-#### TokenUsage（Token 消耗记录）
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| call_type | String(30) | 调用类型：chat / embedding / test / forecast / trend_analysis |
-| model_name | String(100) | 模型名称 |
-| input_tokens | Integer | 输入 token |
-| output_tokens | Integer | 输出 token |
-| duration_ms | Integer | 耗时毫秒 |
-| source | String(50) | 发起来源：qa / qa_cache / search / sync_index / skill_router / test_model |
-| skill_id | Integer FK | 关联 Skill |
-| qa_history_id | Integer FK | 关联问答历史 |
+| input_price / output_price | Float | Token 单价（元/千 token） |
 
 #### Skill（技能路由）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| name | String(100) | Skill 名称 |
-| category | String(50) | 模块维度（制造运营/仓储物流/...） |
-| function | String(50) | 功能维度（故障诊断/保养维护/...） |
 | trigger_keywords | Text (JSON) | 触发关键词列表 |
 | trigger_patterns | Text (JSON) | 触发正则表达式列表 |
-| prompt_template | Text | Prompt 模板（含 {context} {question} 变量） |
+| prompt_template | Text | Prompt 模板（含 {context} {question}） |
 | knowledge_scope | Text (JSON) | 知识范围 `{"category_ids":[],"tag_ids":[]}` |
 | is_default | Boolean | 是否默认兜底 Skill |
 
@@ -383,23 +421,24 @@ LLM Wiki/
 
 ## 6. 后端设计
 
-### 6.1 API 路由总览（13 个模块，70+ 端点）
+### 6.1 API 路由总览（14 个模块，75+ 端点）
 
-| 模块 | 前缀 | 核心端点 |
-|------|------|---------|
-| 认证 | /api/auth | login / me / status |
-| 知识管理 | /api/knowledge | CRUD + upload + batch + rebuild-indexes + download |
-| 分类管理 | /api/categories | 树形 CRUD |
-| 标签管理 | /api/tags | CRUD |
-| Skill 管理 | /api/skills | CRUD + templates + test-route |
-| Skill 选项 | /api/skill-options | CRUD |
-| 模型配置 | /api/models | CRUD + activate + test + status |
-| 搜索 | /api/search | semantic + keyword + history |
-| 智能问答 | /api/qa | ask(SSE) + feedback + suggestions + history |
-| 仪表盘 | /api/dashboard | stats + recent-qa |
-| Token 统计 | /api/token-stats | summary + call-logs + model-call-logs |
-| 数据集 | /api/datasets | CRUD + import + export + preview + template |
-| 时序预测 | /api/forecast | predict + tasks + results + cross-validation + compare-models + statistical-forecast + decomposition + export |
+| 模块 | 前缀 | 核心端点 | 版本变化 |
+|------|------|---------|---------|
+| 认证 | /api/auth | login / me / status | |
+| 知识管理 | /api/knowledge | CRUD + upload + batch + rebuild-indexes + download + **status-logs** | ★ v0.6 新增 status-logs |
+| 分类管理 | /api/categories | 树形 CRUD | |
+| 标签管理 | /api/tags | CRUD | |
+| Skill 管理 | /api/skills | CRUD + templates + test-route | |
+| Skill 选项 | /api/skill-options | CRUD | |
+| 模型配置 | /api/models | CRUD + activate + test + status | |
+| 搜索 | /api/search | semantic + keyword + history | |
+| 智能问答 | /api/qa | ask(SSE) + feedback + suggestions + history | |
+| 仪表盘 | /api/dashboard | stats + recent-qa | |
+| Token 统计 | /api/token-stats | summary + call-logs + model-call-logs | |
+| 数据集 | /api/datasets | CRUD + import + export + preview + template | |
+| 时序预测 | /api/forecast | predict + tasks + results + cross-validation + compare-models + **statistical-forecast（含协变量）** + decomposition + export | ★ v0.6 协变量支持 |
+| **协变量管理** | /api/datasets/{id}/covariates + /api/covariates/{id} | list + create + update + delete + **auto-generate** + preview + future-times | ★ v0.6 新增 |
 
 ### 6.2 服务层核心设计
 
@@ -449,6 +488,8 @@ _hybrid_search(question, skill, db)
 
 **降级策略**：无 Embedding 模型时 `degraded=True`，仅走 BM25 关键词检索。
 
+**v0.6 优化**：RAG 检索仅匹配 `status=published` 的知识（非 published 状态的知识不参与检索）。
+
 #### 6.2.3 Skill 路由（skill_router.py）
 
 **三级匹配**：
@@ -479,87 +520,54 @@ route(question, db)
 | 维度自适应 | 捕获维度不匹配异常自动重建 collection |
 | 距离转相似度 | `score = 1.0 - distance` |
 
-#### 6.2.5 问答缓存（cache_service.py）
+#### 6.2.5 文件解析与文本分块
 
-- **机制**：基于 ChromaDB `answer_cache` collection，向量相似度检索最相似的问题
-- **阈值**：`CACHE_SIMILARITY_THRESHOLD = 0.90`
-- **失效**：知识更新/删除时主动调用 `answer_cache.clear()` 清空全部缓存
-- **命中标记**：`QAHistory.is_cache_hit = 1`，`token_input/output = 0`
-
-#### 6.2.6 文件解析（file_parser.py）
-
-| 格式 | 解析器 | 特性 |
-|------|--------|------|
-| PDF | PyPDF2 | 逐页提取 |
-| DOCX | python-docx | 段落 + 表格 |
-| XLSX | openpyxl | 多 sheet |
-| MD | 原生 | UTF-8 |
-| TXT | 多编码 | utf-8/gbk/gb18030/latin-1 自动尝试 |
-| HTML | BeautifulSoup | 移除 script/style，正则兜底 |
-
-**安全措施**：文件名清理防路径穿越、流式分片写入（1MB chunk）防 OOM、大小限制 50MB。
-
-#### 6.2.7 文本分块（text_chunker.py）
-
-- **Markdown 标题层级感知**：保留标题路径前缀（如 `# 第一章 > 1.1 概述`）
-- **参数**：`chunk_size=500, overlap=50`
-- **策略**：有 Markdown 标题按标题分块，否则按段落 + 长度分块
+- **支持格式**：PDF / DOCX / XLSX / MD / TXT / HTML
+- **多编码兼容**：utf-8 / utf-8-sig / gbk / gb18030 / latin-1
+- **安全措施**：文件名清理防路径穿越、流式分片写入（1MB chunk）防 OOM、大小限制 50MB
+- **Markdown 感知分块**：保留标题路径前缀，默认 `chunk_size=500, overlap=50`
 
 ---
 
 ## 7. 前端设计
 
-### 7.1 路由配置（17 条路由）
+### 7.1 路由配置（18 条路由，v0.6 新增协变量管理）
 
-| 路径 | 页面 | 认证 | 说明 |
+| 路径 | 页面 | 说明 | 版本 |
 |------|------|------|------|
-| /login | Login | 公开 | 登录页 |
-| /dashboard | Dashboard | 需认证 | 仪表盘 |
-| /knowledge | KnowledgeList | 需认证 | 知识列表 |
-| /knowledge/upload | KnowledgeUpload | 需认证 | 批量上传 |
-| /knowledge/edit/:id? | KnowledgeEdit | 需认证 | 编辑知识 |
-| /knowledge/detail/:id | KnowledgeDetail | 需认证 | 知识详情 |
-| /search | Search | 需认证 | 搜索 |
-| /qa | QA | 需认证 | 智能问答（SSE 流式） |
-| /qa/history | QAHistory | 需认证 | 问答历史 |
-| /skills | SkillList | 需认证 | Skill 管理 |
-| /skills/edit/:id? | SkillEdit | 需认证 | 编辑 Skill |
-| /models | ModelConfig | 需认证 | 模型配置 |
-| /token-stats | TokenStats | 需认证 | Token 统计 |
-| /call-logs | CallLogs | 需认证 | 调用日志 |
-| /datasets | DatasetList | 需认证 | 数据集管理 |
-| /trends | Trends | 需认证 | 趋势分析 |
+| /login | Login | 登录页 | |
+| /dashboard | Dashboard | 仪表盘 | |
+| /knowledge | KnowledgeList | 知识列表（含状态筛选） | v0.6 |
+| /knowledge/upload | KnowledgeUpload | 批量上传 | |
+| /knowledge/edit/:id? | KnowledgeEdit | 编辑知识（含状态选择） | v0.6 |
+| /knowledge/detail/:id | KnowledgeDetail | 知识详情 | |
+| /search | Search | 搜索 | |
+| /qa | QA | 智能问答（SSE 流式） | |
+| /qa/history | QAHistory | 问答历史 | |
+| /skills | SkillList | Skill 管理 | |
+| /skills/edit/:id? | SkillEdit | 编辑 Skill | |
+| /models | ModelConfig | 模型配置 | |
+| /token-stats | TokenStats | Token 统计 | |
+| /call-logs | CallLogs | 调用日志 | |
+| /datasets | DatasetList | 数据集管理 | |
+| /datasets/:id/covariates | Covariates | **协变量管理** | ★ v0.6 新增 |
+| /trends | Trends | 趋势分析 | |
 
 **认证守卫**：首次访问动态探测后端是否启用认证，启用时无 token 重定向到 `/login?redirect=原路径`。
 
-### 7.2 状态管理（Pinia）
-
-#### useAppStore（全局应用状态）
-
-| State | 说明 |
-|-------|------|
-| modelStatus | 当前 LLM / Embedding / Forecast 启用状态 |
-| needsGuide | 是否需要首次引导 |
-| collapsed | 侧边栏折叠状态 |
-
-| Getter | 说明 |
-|--------|------|
-| hasActiveLLM | 是否有启用的 LLM |
-| isConfigured | 是否完成首次配置（仅判断 hasActiveLLM） |
-
-### 7.3 通用组件
+### 7.2 通用组件
 
 | 组件 | 功能 |
 |------|------|
 | AiChatButton | 右下角浮动智能问答，流式接收、Markdown 渲染、可中断 |
 | CategoryTree | 分类树展示，节点显示知识数量徽标，支持 CRUD |
 | FileUpload | 拖拽上传，文件队列表格，大小格式化 |
-| MarkdownEditor | 分屏编辑器（编辑 + 预览），工具栏（标题/粗体/列表/代码/链接/引用） |
+| MarkdownEditor | 分屏编辑器（编辑 + 预览），工具栏 |
 | MarkdownView | Markdown 只读渲染 |
 | SkillOptionManager | Skill 分类/功能选项管理弹窗 |
 | TagSelect | 标签多选 + 搜索 + 新建（带颜色面板） |
 
-### 7.4 请求封装（request.ts）
+### 7.3 请求封装（request.ts）
 
 ```
 axios 实例（baseURL: /api, timeout: 30s）
@@ -591,7 +599,6 @@ qa_service.ask(db, question, use_cache=True)
   ├─ 1. Skill 路由
   │    skill_router.route(question, db)
   │    → 关键词 "设备异常" 命中 "故障诊断" Skill
-  │    → match_type="keyword"
   │
   ├─ 2. 计算查询向量（复用优化）
   │    q_embedding = embedding_service.embed([question], source="qa_cache")
@@ -604,58 +611,49 @@ qa_service.ask(db, question, use_cache=True)
   ├─ 4. RAG 检索增强
   │    rag_service.answer(question, skill, db, q_embedding=q_embedding)
   │    │
-  │    ├─ 4a. 混合检索
+  │    ├─ 4a. 混合检索（仅 status=published 的知识）★ v0.6
   │    │    _hybrid_search(q_vec, question, skill, db)
   │    │    ├─ 向量检索：ChromaDB 余弦检索 top_k=5
   │    │    ├─ BM25 检索：SQLite LIKE + jieba 分词
   │    │    └─ RRF 融合：score = Σ 1/(60 + rank)
   │    │
-  │    ├─ 4b. Prompt 组装
-  │    │    prompt_assembler.assemble(skill, question, context_chunks)
-  │    │    → Token 预算控制（MAX_CONTEXT_TOKENS=4000）
+  │    ├─ 4b. Prompt 组装（Token 预算控制 MAX_CONTEXT_TOKENS=4000）
   │    │
-  │    └─ 4c. LLM 生成
-  │         llm.chat(messages) → {content, tokens, model}
+  │    └─ 4c. LLM 生成 → {content, tokens, model}
   │
-  ├─ 5. 保存历史
-  │    QAHistory(question, answer, sources, skill_id, tokens)
-  │
-  ├─ 6. 记录 TokenUsage
-  │    TokenUsage(call_type="chat", source="qa", model_name, tokens)
-  │
-  └─ 7. 写入缓存
-       answer_cache.put(question, answer, q_embedding)
+  ├─ 5. 保存历史 + 记录 TokenUsage + 写入缓存
 ```
 
-### 8.2 SSE 流式问答
+### 8.2 知识状态变更流程（★ v0.6 新增）
 
 ```
-POST /api/qa/ask  (Accept: text/event-stream)
+用户将知识从 published 改为 archived
   │
-  ├─ event: skill      → {"skill_name": "故障诊断", "match_type": "keyword"}
-  ├─ event: sources    → {"sources": [...], "degraded": false}
-  ├─ event: chunk      → {"content": "根据"} (逐步 yield)
-  ├─ event: chunk      → {"content": "设备手册"}
-  ├─ ...
-  └─ event: done       → {"history_id": 42, "tokens": {...}}
-```
-
-**取消处理**：捕获 `asyncio.CancelledError`，保存已生成的部分答案到 `QAHistory`。
-
-### 8.3 搜索流程
-
-```
-GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
+  ▼
+knowledge_service.update(db, id, data={status: "archived"})
   │
-  ├─ 向量化查询
-  ├─ ChromaDB 检索（top_k = page * page_size * 2）
-  ├─ 批量查询 Knowledge（joinedload 避免 N+1）
-  ├─ 应用层过滤：tag_ids + 时间范围
-  ├─ 去重（每个 knowledge_id 取第一个 chunk）
-  └─ 分页返回
+  ├─ 1. 读取旧状态 old_status = knowledge.status  # "published"
+  ├─ 2. 更新 status = "archived"
+  ├─ 3. 记录审计日志
+  │    _log_status_change(db, knowledge, "published", "archived", operator, reason)
+  │    → KnowledgeStatusLog(knowledge_id, title, old, new, operator, reason)
+  ├─ 4. 向量索引联动
+  │    published→archived: remove_vector_index(knowledge_id)
+  │    其他→published: sync_vector_index(db, knowledge_id)
+  └─ 5. 清除答案缓存
+       answer_cache.clear()
 ```
 
-**降级**：语义搜索失败时前端自动切换为关键词搜索。
+### 8.3 状态与索引联动规则
+
+| 状态转换 | 向量索引动作 | 说明 |
+|---------|------------|------|
+| → published | 创建/重建索引 | 知识可被 RAG 检索 |
+| published → draft | 移除索引 | 知识不再被检索 |
+| published → archived | 移除索引 | 归档知识不再被检索 |
+| draft → archived | 无动作 | 本来就没有索引 |
+| draft → published | 创建索引 | 发布草稿 |
+| archived → published | 创建索引 | 重新发布归档知识 |
 
 ---
 
@@ -664,21 +662,22 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 ### 9.1 架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   forecast_service.py (1850 行)      │
-│                                                       │
-│  ┌──────────┐  ┌──────────┐  ┌────────────────────┐  │
-│  │ 数据预处理 │  │ 预测执行  │  │ 评估与分析          │  │
-│  │ 缺失值插值 │  │          │  │ 回测误差 MAE/MAPE  │  │
-│  │ IQR异常截断│  │ Chronos  │  │ 扩展指标 MASE     │  │
-│  │          │  │ TimesFM  │  │ LLM 分析报告       │  │
-│  └──────────┘  │ ARIMA    │  │ STL 季节性分解     │  │
-│                │ ETS/Theta │  │ 交叉验证           │  │
-│  ┌──────────┐  └──────────┘  │ 多模型对比          │  │
-│  │ 时间标签   │              └────────────────────┘  │
-│  │ 自动生成   │                                       │
-│  └──────────┘                                       │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                forecast_service.py                        │
+│                                                            │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐  │
+│  │ 数据预处理 │  │ 预测执行  │  │ 评估与分析              │  │
+│  │ 缺失值插值 │  │          │  │ 回测误差 MAE/MAPE      │  │
+│  │ IQR异常截断│  │ Chronos  │  │ 扩展指标 MASE         │  │
+│  │          │  │ TimesFM  │  │ LLM 分析报告           │  │
+│  │          │  │ ARIMA★   │  │ STL 季节性分解         │  │
+│  │          │  │ ETS      │  │ 交叉验证               │  │
+│  │          │  │ Theta    │  │ 多模型对比             │  │
+│  │          │  │ Prophet★ │  │                        │  │
+│  └──────────┘  └──────────┘  └────────────────────────┘  │
+│                                                            │
+│  ★ = v0.6 支持协变量（exog）                                │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### 9.2 预测模式
@@ -687,16 +686,19 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 |------|------|
 | 预测未来 | 从历史末尾预测未来 horizon 步 |
 | 回测对照 | 从 start_index 拆分，训练集预测，与 actuals 对比计算误差 |
-| 滑动窗口 | 仅使用最后 train_window 个点训练（N6 优化） |
+| 滑动窗口 | 仅使用最后 train_window 个点训练 |
+| 交叉验证 | expanding / sliding 策略多次回测取平均 |
+| 多模型对比 | 临时切换激活模型执行回测，按 MAE 最低找出最优 |
 
-### 9.3 模型类型
+### 9.3 模型类型与协变量支持（★ v0.6）
 
-| 类型 | 模型 | 说明 |
-|------|------|------|
-| 深度学习 | Chronos-2 / TimesFM 2.5 | 调用 Forecast 推理服务 HTTP /predict |
-| 统计模型 | ARIMA | 自动 AIC 搜索阶数（p,d,q 网格搜索） |
-| 统计模型 | ETS | 指数平滑，置信区间随 horizon 增长 |
-| 统计模型 | Theta | θ=0 + θ=2 取平均 |
+| 类型 | 模型 | 协变量支持 | 说明 |
+|------|------|-----------|------|
+| 深度学习 | Chronos-2 / TimesFM 2.5 | ❌（接口已预留） | 调用 Forecast 推理服务 HTTP /predict |
+| 统计模型 | ARIMA | ✅ | exog_train + exog_future 参数 |
+| 统计模型 | Prophet | ✅ | add_regressor + 中国节假日 |
+| 统计模型 | ETS | ❌ | 不支持 exog |
+| 统计模型 | Theta | ❌ | 不支持 exog |
 
 ### 9.4 评估指标
 
@@ -711,19 +713,131 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 | Coverage | 置信区间覆盖率 |
 | rMAE | 相对 MAE（模型 / Naive 基线） |
 
-### 9.5 高级功能
+---
 
-- **交叉验证**：支持 expanding / sliding 策略，多次回测取平均和标准差
-- **多模型对比**：临时切换激活模型执行回测，按 MAE 最低找出最优模型
-- **STL 季节性分解**：基于 statsmodels，返回趋势/季节/残差分量 + 季节性强度
-- **LLM 分析报告**：调用 LLM 生成自然语言趋势分析（含历史采样优化避免 token 过多）
-- **统计基线**：Naive / SeasonalNaive 作为对照基准
+## 10. 协变量系统（v0.6 新增）
+
+### 10.1 概述
+
+协变量（Covariate / Exogenous Variable）是时序预测中的外生变量，用于增强统计模型（ARIMA / Prophet）的预测能力。例如：节假日、工作日、温度、促销活动等。
+
+### 10.2 协变量类型
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| continuous | 连续型 | 温度、价格、湿度 |
+| binary | 二元型 | 是否节假日、是否促销 |
+| categorical | 分类型 | 季节（需用户编码为数值） |
+
+### 10.3 自动生成协变量
+
+系统根据数据集频率自动生成常用协变量：
+
+| 频率 | 自动生成的协变量 |
+|------|-----------------|
+| 所有频率 | `trend`（线性趋势 t=1,2,3...） |
+| daily/weekly/monthly | `is_holiday`（中国法定节假日，1=节假日） |
+| daily/hourly | `is_weekend`（周六/周日 = 1） |
+| monthly | `month_sin` + `month_cos`（周期编码 2π·month/12） |
+| daily | `dow_sin` + `dow_cos`（周期编码 2π·weekday/7） |
+| quarterly | `quarter_sin` + `quarter_cos`（周期编码 2π·quarter/4） |
+
+**节假日数据**：内置 [china_holidays.json](file:///d:/AI/Trae/LLM%20Wiki/backend/app/data/china_holidays.json)，覆盖 2024-2026 年中国法定节假日。
+
+### 10.4 协变量接入预测管道
+
+```
+run_statistical_forecast(db, dataset_id, horizon, model_type, use_covariates=True)
+  │
+  ├─ use_covariates=True && model_type in ("arima", "prophet")
+  │
+  ├─ build_exog_matrix(db, dataset_id, train_times, future_times)
+  │   │
+  │   ├─ 查询数据集所有协变量（按 id 升序）
+  │   ├─ 提取 code 作为 feature_names
+  │   ├─ 对每个协变量调用 align_covariate(main_times, cov_values)
+  │   │   │
+  │   │   ├─ 精确匹配：time 字段完全相等
+  │   │   ├─ 日期前缀匹配：YYYY-MM 前缀（用于 monthly→daily 对齐）
+  │   │   └─ 缺失填 0.0
+  │   │
+  │   └─ 返回 (X_train, X_future, feature_names)
+  │
+  ├─ ARIMA：ARIMA(train, order, exog=X_train).forecast(horizon, exog=X_future)
+  │
+  └─ Prophet：m.add_regressor("reg_" + name) × N → 预测
+```
+
+### 10.5 API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/datasets/{id}/covariates | 列出协变量 |
+| POST | /api/datasets/{id}/covariates | 新增协变量 |
+| PUT | /api/covariates/{id} | 修改协变量 |
+| DELETE | /api/covariates/{id} | 删除协变量 |
+| POST | /api/datasets/{id}/covariates/auto-generate | 自动生成协变量 |
+| GET | /api/datasets/{id}/covariates/preview | 预览对齐矩阵 |
+| GET | /api/datasets/{id}/covariates/future-times | 生成未来时间标签 |
 
 ---
 
-## 10. 安全设计
+## 11. 知识状态生命周期（v0.6 新增）
 
-### 10.1 认证与授权
+### 11.1 三种状态
+
+| 状态 | 说明 | 向量索引 | RAG 检索 |
+|------|------|---------|---------|
+| draft | 草稿 | 无索引 | 不可检索 |
+| published | 发布 | 有索引 | ✅ 可检索 |
+| archived | 归档 | 无索引 | 不可检索 |
+
+### 11.2 状态转换图
+
+```
+        create()
+           │
+           ▼
+      ┌─────────┐  update(status="draft")    ┌─────────┐
+      │published │ ───────────────────────→  │  draft  │
+      │ (默认)   │ ←───────────────────────  │ (草稿)  │
+      └────┬────┘  update(status="published") └─────────┘
+           │
+           │ update(status="archived")
+           ▼
+      ┌─────────┐  update(status="published") ┌─────────┐
+      │archived │ ←─────────────────────────  │published│
+      │ (归档)  │ ───────────────────────→    │ (重新发布)│
+      └─────────┘                              └─────────┘
+```
+
+### 11.3 审计日志
+
+每次状态变更自动记录 `KnowledgeStatusLog`：
+- 记录 `old_status` → `new_status`
+- 快照知识标题（防止后续修改导致追溯困难）
+- 记录操作人（`operator`）和变更原因（`reason`）
+- 失败不阻断主流程（try/except 包裹）
+
+查询端点：`GET /api/knowledge/{id}/status-logs?page=1&page_size=20`
+
+### 11.4 索引联动规则
+
+| 操作 | 索引动作 | 缓存动作 |
+|------|---------|---------|
+| 创建 published 知识 | 创建索引 | — |
+| 创建 draft/archived 知识 | 无索引 | — |
+| published → draft/archived | 移除索引 | 清除答案缓存 |
+| draft/archived → published | 创建索引 | 清除答案缓存 |
+| 更新 published 知识内容 | 重建索引 | 清除答案缓存 |
+| 删除知识 | 移除索引 | 清除答案缓存 |
+| 批量状态变更 | 逐条联动 | 清除答案缓存 |
+
+---
+
+## 12. 安全设计
+
+### 12.1 认证与授权
 
 | 机制 | 说明 |
 |------|------|
@@ -732,7 +846,7 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 | 生产强制 | `DEBUG=false` 时强制校验 AUTH_ENABLED=true |
 | 路由保护 | 所有业务路由 `Depends(require_auth)` |
 
-### 10.2 数据安全
+### 12.2 数据安全
 
 | 机制 | 说明 |
 |------|------|
@@ -742,7 +856,7 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 | HTML 净化 | DOMPurify 白名单（仅允许安全标签和属性） |
 | Markdown 安全 | `html: false` 禁止原生 HTML 渲染 |
 
-### 10.3 生产环境安全校验
+### 12.3 生产环境安全校验
 
 启动时 `validate_security_config()` 在 `DEBUG=false` 时强制检查：
 
@@ -753,9 +867,9 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 
 ---
 
-## 11. 配置与部署
+## 13. 配置与部署
 
-### 11.1 环境变量
+### 13.1 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -772,14 +886,15 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 | CORS_ORIGINS | * | CORS 来源 |
 | CACHE_SIMILARITY_THRESHOLD | 0.90 | 缓存阈值 |
 
-### 11.2 自动迁移机制
+### 13.2 自动迁移机制
 
 `_auto_migrate()` 基于 SQLite `ALTER TABLE ADD COLUMN`：
 - 查询现有列（`PRAGMA table_info`）
 - 仅添加不存在的列
-- 失败不阻塞启动（记录日志）
+- v0.6 新增迁移：`knowledge.status VARCHAR(20) DEFAULT 'published'`
+- 全新表（dataset_covariates、knowledge_status_log）由 `create_all` 直接创建
 
-### 11.3 预制数据
+### 13.3 预制数据
 
 系统首次启动自动创建：
 - 4 个分类（制造运营/仓储物流/质量管理/设备管理）
@@ -789,7 +904,7 @@ GET /api/search/semantic?q=设备保养&category_id=1&tag_ids=2,3
 - 2 个 Forecast 模型配置（Chronos-2 / TimesFM 2.5）
 - 2 个示例时序数据集
 
-### 11.4 启动
+### 13.4 启动
 
 ```bash
 # 后端
@@ -808,7 +923,7 @@ python timesfm_server.py  # :8502
 
 ---
 
-## 12. 版本演进
+## 14. 版本演进
 
 | 版本 | 日期 | 核心内容 |
 |------|------|---------|
@@ -817,6 +932,7 @@ python timesfm_server.py  # :8502
 | v0.3 | 2026-07-09 | 新增 TimesFM 推理服务及 Chronos-Large 部署文档 |
 | v0.4 | 2026-07-10 | 增加时序分析功能（数据集管理 + 预测任务 + 趋势可视化） |
 | v0.5 | 2026-07-12 | 优化一系列问题，增强一系列功能（认证系统、混合检索 RRF、多模型对比、交叉验证、STL 分解、调用日志等） |
+| **v0.6** | 2026-07-12 | **强化 AI 知识库功能，强化趋势预测：新增协变量系统（外生变量）、知识状态生命周期管理（draft/published/archived + 审计日志）、ARIMA/Prophet 协变量接入、中国节假日数据集** |
 
 ---
 
@@ -857,7 +973,24 @@ crypto.encrypt(plaintext)
 | 语义搜索失败 | 前端自动切换为关键词搜索 |
 | jieba 不可用 | 回退到正则切分分词 |
 | BeautifulSoup 未安装 | HTML 解析回退到正则去标签 |
+| 协变量未来值缺失 | align_covariate 填 0.0 |
+
+### D. v0.6 新增功能汇总
+
+| 功能 | 说明 |
+|------|------|
+| 协变量管理 | 完整 CRUD + 自动生成 + 对齐矩阵预览 + 未来时间标签生成 |
+| 协变量类型 | continuous / binary / categorical 三种类型 |
+| 自动生成协变量 | trend / is_holiday / is_weekend / 月份周期 / 周期编码 |
+| 中国节假日 | 2024-2026 年法定节假日数据集 |
+| ARIMA 协变量 | exog_train + exog_future 参数支持 |
+| Prophet 协变量 | add_regressor + 内置中国节假日 |
+| 知识状态 | draft / published / archived 三态生命周期 |
+| 状态审计日志 | KnowledgeStatusLog 记录每次状态变更 |
+| 索引联动 | 状态变更自动同步/移除向量索引 |
+| 缓存联动 | 状态变更自动清除答案缓存 |
+| RAG 过滤 | 仅检索 published 状态的知识 |
 
 ---
 
-*本文档由项目设计书自动生成，基于 v0.5 代码库实际架构。*
+*本文档基于 v0.6 代码库实际架构生成。*

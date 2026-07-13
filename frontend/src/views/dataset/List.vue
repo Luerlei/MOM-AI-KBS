@@ -85,7 +85,7 @@
             <a-dropdown>
               <a>更多 <DownOutlined /></a>
               <template #overlay>
-                <a-menu @click="(e) => onMenuAction(e.key, record)">
+                <a-menu @click="onRecordMenuClick($event, record)">
                   <a-menu-item key="edit">编辑</a-menu-item>
                   <a-menu-item key="exportExcel">导出 Excel</a-menu-item>
                   <a-menu-item key="exportCsv">导出 CSV</a-menu-item>
@@ -464,6 +464,10 @@ async function onMenuAction(key: string, record: Dataset) {
       },
     })
   }
+}
+
+function onRecordMenuClick(info: { key: string | number }, record: Dataset) {
+  onMenuAction(String(info.key), record)
 }
 
 function addDataRow() {
