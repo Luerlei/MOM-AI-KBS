@@ -1,6 +1,6 @@
 # MOM 系统 AI 知识库平台 — 设计书
 
-> **版本**：v0.6 | **更新日期**：2026-07-12 | **状态**：活跃维护中
+> **版本**：v0.7 | **更新日期**：2026-07-13 | **状态**：活跃维护中
 
 ---
 
@@ -20,6 +20,7 @@
 - [12. 安全设计](#12-安全设计)
 - [13. 配置与部署](#13-配置与部署)
 - [14. 版本演进](#14-版本演进)
+- [15. 用户文档与演示数据（v0.7 新增）](#15-用户文档与演示数据v07-新增)
 
 ---
 
@@ -39,6 +40,7 @@
 | 时序预测 | Chronos-2 / TimesFM 深度学习模型 + ARIMA/ETS/Theta/Prophet 统计模型 + **协变量外生变量支持（v0.6）** + STL 分解 + 交叉验证 |
 | 模型管理 | LLM / Embedding / Forecast 三类模型配置、运行时热更新、调用日志全量收集 |
 | 认证授权 | JWT 可选认证、开发环境关闭、生产环境强制开启 |
+| 用户文档 | **完整使用说明书 + 演示实例数据 + 实例问题对照表（v0.7 新增）** |
 
 ### 1.3 设计原则
 
@@ -222,9 +224,10 @@ LLM Wiki/
 │   │       ├── crypto.py             # API Key 加密
 │   │       ├── excel_parser.py        # Excel/CSV 解析
 │   │       └── response.py           # 统一响应格式
-│   ├── scripts/                      # Forecast 推理服务
+│   ├── scripts/                      # Forecast 推理服务 + 演示数据脚本
 │   │   ├── chronos_server.py         # Chronos HTTP 服务
-│   │   └── timesfm_server.py         # TimesFM HTTP 服务
+│   │   ├── timesfm_server.py         # TimesFM HTTP 服务
+│   │   └── seed_demo_data.py         # ★ v0.7 新增：演示数据注入脚本
 │   ├── data/                         # 数据目录（gitignore）
 │   │   ├── knowledge.db              # SQLite
 │   │   ├── vectors/                  # ChromaDB
@@ -282,6 +285,7 @@ LLM Wiki/
 │   └── package.json
 ├── docs/                             # 文档目录
 │   ├── DESIGN.md                     # 本设计书
+│   ├── USER_GUIDE.md                 # ★ v0.7 新增：用户使用说明书
 │   ├── chronos-deploy.md             # Chronos 部署指南
 │   ├── chronos-large-deploy.md       # Chronos-Large 部署
 │   └── timesfm-deploy.md             # TimesFM 部署
@@ -903,6 +907,19 @@ run_statistical_forecast(db, dataset_id, horizon, model_type, use_covariates=Tru
 - 10 个 Skill 分类/功能选项
 - 2 个 Forecast 模型配置（Chronos-2 / TimesFM 2.5）
 - 2 个示例时序数据集
+- **5 个示例知识条目（v0.7 新增）**：分别匹配各 Skill 的 `knowledge_scope`，用于演示 Skill 路由三级匹配与 RAG 检索范围限定
+
+**示例知识条目与 Skill 对应关系（v0.7）**：
+
+| 知识标题 | 分类 | 标签 | 命中 Skill |
+|---------|------|------|-----------|
+| CNC加工中心E01报警故障诊断与处理指南 | 设备管理 | 故障代码 | 故障诊断 |
+| 设备定期保养维护规程与周期表 | 设备管理 | 保养 | 保养维护 |
+| 数控加工工艺参数规范与操作要点 | 制造运营 | 工艺 | 工艺指导 |
+| 产品质量检验标准与不合格品判定规则 | 质量管理 | 质量标准 | 质量检验 |
+| MOM系统操作常见问题FAQ | （无分类） | 操作经验 | 通用问答 |
+
+**重复执行保护**：`seed_service.seed_initial_data()` 通过 `exists()` 检查避免重复创建；`seed_demo_data.py` 通过 `title` 去重，可重复执行注入。
 
 ### 13.4 启动
 
@@ -919,7 +936,13 @@ npm run dev      # http://localhost:5173
 cd backend/scripts
 python chronos_server.py   # :8501
 python timesfm_server.py  # :8502
+
+# 演示数据注入（v0.7 新增，可选，可重复执行）
+cd backend
+python scripts/seed_demo_data.py   # 注入 5 条匹配各 Skill 的示例知识
 ```
+
+> 首次启动后端时已通过 `seed_service.seed_initial_data()` 自动注入全部预制数据（含 5 条示例知识），`seed_demo_data.py` 仅在老库升级或需补齐示例知识时使用。
 
 ---
 
@@ -933,6 +956,7 @@ python timesfm_server.py  # :8502
 | v0.4 | 2026-07-10 | 增加时序分析功能（数据集管理 + 预测任务 + 趋势可视化） |
 | v0.5 | 2026-07-12 | 优化一系列问题，增强一系列功能（认证系统、混合检索 RRF、多模型对比、交叉验证、STL 分解、调用日志等） |
 | **v0.6** | 2026-07-12 | **强化 AI 知识库功能，强化趋势预测：新增协变量系统（外生变量）、知识状态生命周期管理（draft/published/archived + 审计日志）、ARIMA/Prophet 协变量接入、中国节假日数据集** |
+| **v0.7** | 2026-07-13 | **小批量修复：新增用户使用说明书（USER_GUIDE.md）、演示数据注入脚本（seed_demo_data.py）、seed_service 预制 5 条示例知识、Trends/Covariates/dataset/List/CategoryTree 页面 bug 修复、设计书同步更新至 v0.7** |
 
 ---
 
@@ -993,4 +1017,84 @@ crypto.encrypt(plaintext)
 
 ---
 
-*本文档基于 v0.6 代码库实际架构生成。*
+## 15. 用户文档与演示数据（v0.7 新增）
+
+### 15.1 概述
+
+v0.7 围绕「**让最终用户开箱即用**」目标，新增完整用户使用说明书、可重复执行的演示数据注入脚本，并将 seed_service 升级为自动注入 5 条匹配各 Skill `knowledge_scope` 的示例知识条目，使「Skill 路由 + RAG 检索范围限定」机制可在首次启动后立即被验证。
+
+### 15.2 文档体系
+
+| 文档 | 路径 | 受众 | 用途 |
+|------|------|------|------|
+| 设计书 | [docs/DESIGN.md](file:///d:/AI/Trae/LLM%20Wiki/docs/DESIGN.md) | 开发者/架构师 | 架构、数据模型、流程、API 设计 |
+| 使用说明书 | [docs/USER_GUIDE.md](file:///d:/AI/Trae/LLM%20Wiki/docs/USER_GUIDE.md) | 最终用户 | 10 大功能模块逐一操作指南 + 实例问题对照 |
+| Chronos 部署 | docs/chronos-deploy.md | 运维 | Chronos-T5-Small 推理服务部署 |
+| Chronos-Large 部署 | docs/chronos-large-deploy.md | 运维 | 高精度预测服务部署 |
+| TimesFM 部署 | docs/timesfm-deploy.md | 运维 | TimesFM 2.5 推理服务部署 |
+
+### 15.3 USER_GUIDE.md 结构（10 章）
+
+| 章 | 标题 | 内容 |
+|----|------|------|
+| 1 | 系统概览与快速开始 | 四大能力 + 启动流程 |
+| 2 | 实例数据索引（开箱即用） | 数据集/协变量/知识/Skill/模型配置清单 |
+| 3 | 仪表盘 | 卡片与图表说明 |
+| 4 | 数据集管理 | 数据集 CRUD + 协变量管理（重点） |
+| 5 | 趋势分析（每个按钮的使用） | 7 类预测按钮 + 5 个高级分析抽屉 + STL 分解 |
+| 6 | 智能问答与 Skill 路由（重点） | 三级匹配机制 + knowledge_scope + 实例问题对照 |
+| 7 | 知识管理 | 列表/创建/状态生命周期/文件上传 |
+| 8 | Skill 管理 | 关键字段 + Prompt 模板 + knowledge_scope 配置 + 测试路由 |
+| 9 | 模型配置 | LLM/Embedding/Forecast 配置流程 |
+| 10 | 其他功能 | 问答历史、Token 统计、调用日志 |
+
+**关键设计**：第 6 章提供了「实例问题对照表」，5 条示例问题可直接复制到智能问答页测试，验证 Skill 路由命中类型与检索到的知识。
+
+### 15.4 seed_demo_data.py 设计
+
+**职责**：向**运行中**的系统注入 5 条示例知识（不重建数据库），用于老库升级或补齐示例数据。
+
+**实现要点**：
+
+| 设计点 | 实现 |
+|--------|------|
+| 通信方式 | `urllib.request` 直连 HTTP API（不依赖 requests、不依赖 app 模块） |
+| 默认目标 | `http://localhost:8001/api`（与后端默认端口一致） |
+| 去重策略 | 查询已有知识 `title`，命中则 skip |
+| 知识状态 | 注入时 `status="published"`，立即可被 RAG 检索 |
+| 重复执行 | 幂等：相同 title 不会重复创建 |
+| 内容格式 | `content_type="markdown"`，匹配 USER_GUIDE 第 6 章对照表 |
+
+**与 seed_service.seed_initial_data() 的关系**：
+
+| 维度 | seed_service | seed_demo_data.py |
+|------|--------------|-------------------|
+| 调用时机 | 后端启动自动调用 | 用户手动执行 |
+| 范围 | 全部预制数据（分类/标签/Skill/模型/数据集/知识） | 仅 5 条示例知识 |
+| 依赖 | app 模块、SQLAlchemy | 仅 HTTP API |
+| 幂等 | `exists()` 检查 | `title` 去重 |
+| 适用场景 | 全新部署 | 老库升级 / 演示补齐 |
+
+### 15.5 v0.7 页面 Bug 修复清单
+
+| 文件 | 修复内容 |
+|------|---------|
+| frontend/src/components/CategoryTree.vue | 分类树节点交互异常修复 |
+| frontend/src/views/Trends.vue | 趋势分析图表渲染 / 预测结果展示修复 |
+| frontend/src/views/dataset/Covariates.vue | 协变量值编辑器 / 对齐矩阵预览修复 |
+| frontend/src/views/dataset/List.vue | 数据集列表显示修复 |
+
+### 15.6 版本配套更新约定
+
+自 v0.7 起，每次发版配套更新以下文件：
+
+| 文件 | 更新内容 |
+|------|---------|
+| README.md | 版本徽章、版本历史表、技术栈统计、功能模块表 |
+| docs/DESIGN.md | 版本演进表、新增功能章节、目录结构、预制数据 |
+| docs/USER_GUIDE.md | 新增功能操作说明（如涉及用户操作） |
+| 其他必要文件 | 根据发版内容同步（如新增部署文档、新增脚本说明） |
+
+---
+
+*本文档基于 v0.7 代码库实际架构生成。*
