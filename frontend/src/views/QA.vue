@@ -46,6 +46,9 @@
                       <div class="source-header">
                         <span class="source-num">{{ sidx + 1 }}</span>
                         <span class="source-title-text">{{ src.title }}</span>
+                        <span v-if="src.page_number && src.page_number > 0" class="source-page">
+                          <FilePdfOutlined /> 第 {{ src.page_number }} 页
+                        </span>
                         <span v-if="src.score != null" class="source-score" :class="scoreClass(src.score)">
                           {{ (src.score * 100).toFixed(0) }}%
                         </span>
@@ -156,7 +159,8 @@ import {
   LinkOutlined,
   ThunderboltOutlined,
   BulbOutlined,
-  WarningOutlined
+  WarningOutlined,
+  FilePdfOutlined
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import MarkdownIt from 'markdown-it'
@@ -478,6 +482,19 @@ onMounted(() => {
 .source-score {
   font-size: 11px;
   font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.source-page {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  color: #722ed1;
+  background: #f9f0ff;
+  border: 1px solid #d3adf7;
   padding: 1px 6px;
   border-radius: 8px;
   flex-shrink: 0;

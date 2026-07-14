@@ -549,6 +549,68 @@ class RerankClient:
             ]
 
 
+class OCRClient:
+    """OCR/VLM 解析客户端（封装 DeepSeek-OCR / VLM 等 PDF 解析后端）
+
+    通过数据库配置 type=OCR 或 type=VLM 的模型动态选择后端：
+    - type=VLM → VLMBackend（按页转图后调用 vision API）
+    - type=OCR 且 model_name 含 "deepseek-ocr" → DeepSeekOCRBackend
+    - type=OCR 且 model_name 含 "vl"/"vision"/"vlm" → VLMBackend
+    - 其他默认 → DeepSeekOCRBackend
+    """
+
+    def __init__(self, config):
+        from app.utils.crypto import decrypt
+        from app.services.pdf_parser_backend import DeepSeekOCRBackend, VLMBackend
+        self.config = config
+        url = config.api_url.rstrip("/")
+        # 兼容用户填写带后缀的 URL
+        for suffix in ("/chat/completions", "/rerank", "/embeddings", "/predict"):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)]
+                break
+        self.api_url = url
+        self.model_name = config.model_name or ""
+        self.api_key = decrypt(config.api_key) if config.api_key else ""
+        self.last_usage: dict = {}
+
+        # 后端选择：优先看 config.type，其次看 model_name
+        config_type = (getattr(config, "type", "") or "").upper()
+        name_lower = self.model_name.lower()
+
+        if config_type == "VLM":
+            # VLM 类型直接走 VLMBackend
+            self.backend = VLMBackend(
+                api_key=self.api_key,
+                base_url=self.api_url,
+                model=self.model_name,
+            )
+        elif "deepseek-ocr" in name_lower or "deepseek_ocr" in name_lower:
+            self.backend = DeepSeekOCRBackend(
+                api_key=self.api_key,
+                base_url=self.api_url,
+                model=self.model_name,
+            )
+        elif any(kw in name_lower for kw in ("vlm", "-vl", "vision", "gpt-4o", "vl-")):
+            # model_name 含视觉模型关键词 → VLMBackend
+            self.backend = VLMBackend(
+                api_key=self.api_key,
+                base_url=self.api_url,
+                model=self.model_name,
+            )
+        else:
+            # 默认走 DeepSeek-OCR
+            self.backend = DeepSeekOCRBackend(
+                api_key=self.api_key,
+                base_url=self.api_url,
+                model=self.model_name,
+            )
+
+    def parse(self, file_path: str):
+        """解析 PDF 文件"""
+        return self.backend.parse(file_path)
+
+
 class ModelManager:
     """模型管理器：从数据库读取启用的模型配置（带内存缓存）
 
@@ -677,6 +739,21 @@ class ModelManager:
         """获取启用的 Rerank 客户端（可选配置，未配置时返回 None）"""
         client = cls._get_or_create_client("Rerank", lambda c: RerankClient(c))
         return client  # None 表示未配置，调用方应跳过 rerank 步骤
+
+    @classmethod
+    def get_active_ocr(cls) -> Optional["OCRClient"]:
+        """获取启用的 OCR/VLM 客户端（可选配置，未配置时返回 None）
+
+        查找优先级：OCR 类型优先，未配置则查找 VLM 类型。
+        配置后，PDF 解析将自动使用该后端替代 PyPDF2。
+        """
+        # 优先查找 OCR 类型
+        client = cls._get_or_create_client("OCR", lambda c: OCRClient(c))
+        if client:
+            return client
+        # 回退查找 VLM 类型
+        client = cls._get_or_create_client("VLM", lambda c: OCRClient(c))
+        return client
 
 
 model_manager = ModelManager()

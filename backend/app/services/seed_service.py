@@ -101,6 +101,35 @@ INITIAL_FORECAST_MODELS = [
     },
 ]
 
+# P0-3: 预置硅基流动 Rerank/OCR/VLM 模型配置（用户只需填 API Key 即可激活）
+# 参照 RAGFlow 的多模型重排序能力，开箱即用
+INITIAL_AUX_MODELS = [
+    {
+        "name": "bge-reranker-v2-m3 (硅基流动)",
+        "type": "Rerank",
+        "api_url": "https://api.siliconflow.cn/v1",
+        "api_key": "",  # 用户填入硅基流动 API Key 后激活
+        "model_name": "BAAI/bge-reranker-v2-m3",
+        "is_active": False,
+    },
+    {
+        "name": "DeepSeek-OCR (硅基流动)",
+        "type": "OCR",
+        "api_url": "https://api.siliconflow.cn/v1",
+        "api_key": "",  # 用户填入硅基流动 API Key 后激活
+        "model_name": "deepseek-ai/DeepSeek-OCR",
+        "is_active": False,
+    },
+    {
+        "name": "Qwen3-VL-32B (硅基流动)",
+        "type": "VLM",
+        "api_url": "https://api.siliconflow.cn/v1",
+        "api_key": "",  # 用户填入硅基流动 API Key 后激活
+        "model_name": "Qwen/Qwen3-VL-32B-Instruct",
+        "is_active": False,
+    },
+]
+
 
 # 预制示例时序数据集（用于趋势分析演示）
 # 数据格式: [{time, value, label}, ...]
@@ -259,6 +288,23 @@ def seed_initial_data():
                     is_active=fdef["is_active"],
                 )
                 db.add(fc)
+        db.commit()
+
+        # 5.5 P0-3: 创建预制 Rerank/OCR 模型配置（用户填 API Key 即可激活）
+        for adef in INITIAL_AUX_MODELS:
+            existing = db.query(ModelConfig).filter(
+                ModelConfig.name == adef["name"], ModelConfig.type == adef["type"]
+            ).first()
+            if not existing:
+                ac = ModelConfig(
+                    name=adef["name"],
+                    type=adef["type"],
+                    api_url=adef["api_url"],
+                    api_key=encrypt(adef["api_key"]) if adef["api_key"] else "",
+                    model_name=adef["model_name"],
+                    is_active=adef["is_active"],
+                )
+                db.add(ac)
         db.commit()
 
         # 6. 创建预制示例时序数据集

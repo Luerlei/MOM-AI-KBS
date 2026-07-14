@@ -21,11 +21,13 @@ def list_models(type: str = None, db: Session = Depends(get_db), user=Depends(re
 
 @router.get("/status")
 def get_status(db: Session = Depends(get_db), user=Depends(require_auth)):
-    """获取当前启用的 LLM / Embedding / Forecast / Rerank 模型状态"""
+    """获取当前启用的 LLM / Embedding / Forecast / Rerank / OCR / VLM 模型状态"""
     llm = db.query(ModelConfig).filter(ModelConfig.type == "LLM", ModelConfig.is_active == True).first()  # noqa: E712
     emb = db.query(ModelConfig).filter(ModelConfig.type == "Embedding", ModelConfig.is_active == True).first()  # noqa: E712
     fc = db.query(ModelConfig).filter(ModelConfig.type == "Forecast", ModelConfig.is_active == True).first()  # noqa: E712
     rr = db.query(ModelConfig).filter(ModelConfig.type == "Rerank", ModelConfig.is_active == True).first()  # noqa: E712
+    ocr = db.query(ModelConfig).filter(ModelConfig.type == "OCR", ModelConfig.is_active == True).first()  # noqa: E712
+    vlm = db.query(ModelConfig).filter(ModelConfig.type == "VLM", ModelConfig.is_active == True).first()  # noqa: E712
 
     embedding_status = None
     if emb:
@@ -39,11 +41,21 @@ def get_status(db: Session = Depends(get_db), user=Depends(require_auth)):
     if rr:
         rerank_status = {"id": rr.id, "name": rr.name, "model_name": rr.model_name, "source": "external"}
 
+    ocr_status = None
+    if ocr:
+        ocr_status = {"id": ocr.id, "name": ocr.name, "model_name": ocr.model_name, "source": "external"}
+
+    vlm_status = None
+    if vlm:
+        vlm_status = {"id": vlm.id, "name": vlm.name, "model_name": vlm.model_name, "source": "external"}
+
     return success({
         "llm": {"id": llm.id, "name": llm.name, "model_name": llm.model_name} if llm else None,
         "embedding": embedding_status,
         "forecast": forecast_status,
         "rerank": rerank_status,
+        "ocr": ocr_status,
+        "vlm": vlm_status,
     })
 
 

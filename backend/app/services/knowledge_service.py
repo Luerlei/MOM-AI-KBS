@@ -586,13 +586,26 @@ async def sync_vector_index(db, knowledge_id: int) -> bool:
     from datetime import datetime as _dt
     _now = _dt.utcnow().isoformat()
     # metadata
+    # P0-4: 增加 chunk_id 和 page_number，支持引用溯源精确定位
+    import re as _re
+    _page_re = _re.compile(r'<!--\s*page\s+(\d+)\s*[^>]*-->', _re.IGNORECASE)
     metadata = []
     for i, c in enumerate(chunks):
+        # 从 chunk 文本中提取页码注释（VLM 后端会写入 <!-- page N -->）
+        page_number = 0
+        m = _page_re.search(c[:500]) if c else None
+        if m:
+            try:
+                page_number = int(m.group(1))
+            except (ValueError, TypeError):
+                page_number = 0
         metadata.append({
             "knowledge_id": knowledge_id,
             "title": k.title,
             "category_id": str(k.category_id) if k.category_id else "",
             "chunk_index": i,
+            "chunk_id": f"{knowledge_id}_{i}",  # P0-4: 向量库中的唯一 chunk 标识
+            "page_number": page_number,           # P0-4: 页码（用于引用溯源精确定位）
             "embedding_model": embedding_model_name,
             "embedding_dim": embedding_dim,
             "indexed_at": _now,
@@ -604,10 +617,18 @@ async def sync_vector_index(db, knowledge_id: int) -> bool:
             embeddings=embeddings,
             metadata=metadata,
         )
-        return True
     except Exception:
         logger.exception(f"[sync_vector_index] 写入 ChromaDB 失败 knowledge_id={knowledge_id}")
         return False
+
+    # P0-2: 同步 BM25 索引（真 BM25）
+    try:
+        from app.services.bm25_service import bm25_index
+        bm25_index.add_document(knowledge_id, k.title or "", k.content or "")
+    except Exception:
+        logger.exception(f"[sync_vector_index] BM25 索引同步失败 knowledge_id={knowledge_id}")
+
+    return True
 
 
 def remove_vector_index(knowledge_id: int):
@@ -616,6 +637,13 @@ def remove_vector_index(knowledge_id: int):
         vector_store.delete(knowledge_id)
     except Exception:
         logger.exception(f"[remove_vector_index] 移除向量索引失败 knowledge_id={knowledge_id}")
+
+    # P0-2: 同步移除 BM25 索引
+    try:
+        from app.services.bm25_service import bm25_index
+        bm25_index.remove_document(knowledge_id)
+    except Exception:
+        logger.exception(f"[remove_vector_index] BM25 索引移除失败 knowledge_id={knowledge_id}")
 
 
 async def rebuild_all_indexes(db):

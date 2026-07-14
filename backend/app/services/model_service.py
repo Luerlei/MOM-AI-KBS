@@ -122,6 +122,68 @@ async def test_connection(db, id: int) -> ModelTestResult:
 
     start = time.time()
     try:
+        if config.type in ("OCR", "VLM"):
+            # OCR/VLM 是 vision 模型，纯文本 ping 通常返回 400/422（要求 image_url 输入）。
+            # 2xx 和 400/422 都表示 API 可达且认证通过，算连通成功。
+            # 401/403 表示认证失败，404 表示端点错误，5xx 表示服务异常。
+            import httpx as _httpx
+            from app.services.llm_client import _build_ssl_context
+            from app.utils.crypto import decrypt
+            api_url = config.api_url.rstrip("/")
+            for suffix in ("/chat/completions", "/rerank", "/embeddings", "/predict"):
+                if api_url.endswith(suffix):
+                    api_url = api_url[: -len(suffix)]
+                    break
+            api_key = decrypt(config.api_key) if config.api_key else ""
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            try:
+                async with _httpx.AsyncClient(timeout=30.0, verify=_build_ssl_context(), trust_env=False) as _http:
+                    resp = await _http.post(
+                        f"{api_url}/chat/completions",
+                        headers=headers,
+                        json={
+                            "model": config.model_name,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "max_tokens": 5,
+                        },
+                    )
+            except Exception as e:
+                latency = int((time.time() - start) * 1000)
+                _log_test_usage(db, config, 0, 0, latency_ms=latency, success=False)
+                return ModelTestResult(
+                    success=False,
+                    message=f"连接失败（网络异常）: {type(e).__name__}: {str(e)[:150]}",
+                    latency_ms=latency,
+                )
+            latency = int((time.time() - start) * 1000)
+            # 2xx 成功
+            if 200 <= resp.status_code < 300:
+                _log_test_usage(db, config, 0, 0, latency_ms=latency)
+                type_label = "VLM" if config.type == "VLM" else "OCR"
+                return ModelTestResult(
+                    success=True,
+                    message=f"连接成功，{type_label} 模型: {config.model_name}",
+                    latency_ms=latency,
+                )
+            # 400/422 表示 API 可达，只是输入格式不对（vision 模型需要图片/PDF）
+            if resp.status_code in (400, 422):
+                _log_test_usage(db, config, 0, 0, latency_ms=latency)
+                type_label = "VLM" if config.type == "VLM" else "OCR"
+                return ModelTestResult(
+                    success=True,
+                    message=f"API 可达，{type_label} 模型: {config.model_name}（纯文本 ping 返回 {resp.status_code} 属正常，需 PDF/图片输入）",
+                    latency_ms=latency,
+                )
+            # 其他错误码
+            body = resp.text[:200]
+            _log_test_usage(db, config, 0, 0, latency_ms=latency, success=False)
+            return ModelTestResult(
+                success=False,
+                message=f"连接失败({resp.status_code}): {body}",
+                latency_ms=latency,
+            )
         if config.type == "Rerank":
             # Rerank 模型：发送简单 rerank 请求测试连通性
             rr = RerankClient(config)

@@ -213,7 +213,7 @@ export interface SkillTestResult {
 /**
  * 模型类型
  */
-export type ModelType = 'LLM' | 'Embedding' | 'Forecast' | 'Rerank'
+export type ModelType = 'LLM' | 'Embedding' | 'Forecast' | 'Rerank' | 'OCR' | 'VLM'
 
 /**
  * 模型配置
@@ -246,6 +246,9 @@ export interface ModelStatus {
   llm: ModelStatusItem | null
   embedding: ModelStatusItem | null
   forecast: ModelStatusItem | null
+  rerank?: ModelStatusItem | null
+  ocr?: ModelStatusItem | null
+  vlm?: ModelStatusItem | null
 }
 
 /**
@@ -283,6 +286,8 @@ export interface QAReference {
   title: string
   score?: number
   snippet?: string
+  chunk_id?: string
+  page_number?: number
 }
 
 /**

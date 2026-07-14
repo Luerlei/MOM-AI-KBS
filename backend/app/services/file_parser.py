@@ -1,10 +1,13 @@
 """文件解析服务，支持 PDF / Word / Excel / Markdown / TXT / HTML"""
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
 from app.config import UPLOAD_PATH, FILE_PARSER_MAP, ALLOWED_FILE_TYPES, MAX_FILE_SIZE
 from app.utils.response import APIError
+
+logger = logging.getLogger(__name__)
 
 
 def get_file_type(filename: str) -> str:
@@ -44,14 +47,29 @@ def parse_file(file_path: str, file_type: str) -> str:
 
 
 def _parse_pdf(file_path: str) -> str:
-    """解析PDF文件"""
-    from PyPDF2 import PdfReader
-    reader = PdfReader(file_path)
-    texts = []
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        texts.append(text)
-    return "\n".join(texts).strip()
+    """解析PDF文件
+
+    按配置选择后端：
+    - pypdf2: 原有 PyPDF2 文本层抽取（默认兜底）
+    - deepseek-ocr: 硅基流动 DeepSeek-OCR API（结构化 Markdown）
+    - vlm: 多模态 LLM 视觉理解
+    - auto: 优先数据库 OCR 模型配置，回退 PyPDF2
+    """
+    from app.services.pdf_parser_backend import get_pdf_backend, PyPDF2Backend
+
+    backend = get_pdf_backend()
+    try:
+        result = backend.parse(file_path)
+        if not result.text or not result.text.strip():
+            # 解析结果为空时回退到 PyPDF2
+            logger.warning(f"[file_parser] PDF 后端 {result.backend} 返回空内容，回退到 PyPDF2")
+            return PyPDF2Backend().parse(file_path).text
+        logger.info(f"[file_parser] PDF 解析完成 backend={result.backend} chars={len(result.text)}")
+        return result.text
+    except Exception as e:
+        # 高级后端失败时回退到 PyPDF2（保证可用性）
+        logger.warning(f"[file_parser] PDF 后端 {backend.__class__.__name__} 失败: {e}，回退到 PyPDF2")
+        return PyPDF2Backend().parse(file_path).text
 
 
 def _parse_docx(file_path: str) -> str:

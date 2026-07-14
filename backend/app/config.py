@@ -77,6 +77,20 @@ FILE_PARSER_MAP = {
     ".htm": "html",
 }
 
+# PDF 解析后端配置（P0-1: 参照 RAGFlow DeepDOC 补齐解析短板）
+# 可选值：pypdf2（默认）/ deepseek-ocr / vlm / auto（按数据库 OCR 模型配置）
+PDF_PARSER_BACKEND: str = os.getenv("PDF_PARSER_BACKEND", "auto")
+
+# DeepSeek-OCR 后端（硅基流动，直接吃 PDF 返回结构化 Markdown）
+DEEPSEEK_OCR_API_KEY: str = os.getenv("DEEPSEEK_OCR_API_KEY", "")
+DEEPSEEK_OCR_BASE_URL: str = os.getenv("DEEPSEEK_OCR_BASE_URL", "https://api.siliconflow.cn/v1")
+DEEPSEEK_OCR_MODEL: str = os.getenv("DEEPSEEK_OCR_MODEL", "deepseek-ai/DeepSeek-OCR")
+
+# 多模态 LLM 视觉解析后端（按页转图后调用 vision API）
+VLM_API_KEY: str = os.getenv("VLM_API_KEY", "")
+VLM_BASE_URL: str = os.getenv("VLM_BASE_URL", "https://api.siliconflow.cn/v1")
+VLM_MODEL: str = os.getenv("VLM_MODEL", "Qwen/Qwen3-VL-32B-Instruct")
+
 
 def get_cors_origins() -> list:
     """解析 CORS_ORIGINS 为列表"""

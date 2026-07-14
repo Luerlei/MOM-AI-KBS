@@ -163,7 +163,7 @@ class RAGService:
         # Rerank 重排序（可选，配置了 Rerank 模型时启用）
         results = await self._rerank_results(search_query, results)
 
-        # 组装 sources
+        # 组装 sources（P0-4: 增加 chunk_id 和 page_number 用于引用溯源）
         for r in results:
             meta = r.get("metadata", {})
             sources.append({
@@ -171,6 +171,8 @@ class RAGService:
                 "title": meta.get("title", "未知来源"),
                 "snippet": (r.get("document", "") or "")[:200],
                 "score": r.get("score", 0.0),
+                "chunk_id": meta.get("chunk_id", ""),
+                "page_number": int(meta.get("page_number", 0) or 0),
             })
 
         # 2. 组装 Prompt（K-1: 传入 history 支持多轮对话）
@@ -236,7 +238,7 @@ class RAGService:
         # Rerank 重排序（可选，配置了 Rerank 模型时启用）
         results = await self._rerank_results(search_query, results)
 
-        # 组装 sources
+        # 组装 sources（P0-4: 增加 chunk_id 和 page_number 用于引用溯源）
         for r in results:
             meta = r.get("metadata", {})
             sources.append({
@@ -244,6 +246,8 @@ class RAGService:
                 "title": meta.get("title", "未知来源"),
                 "snippet": (r.get("document", "") or "")[:200],
                 "score": r.get("score", 0.0),
+                "chunk_id": meta.get("chunk_id", ""),
+                "page_number": int(meta.get("page_number", 0) or 0),
             })
 
         # 先 yield 来源（附带降级标记和低置信度标记）
@@ -521,7 +525,10 @@ class RAGService:
         return result
 
     def _bm25_search(self, db, question: str, scope: dict, limit: int = 10) -> list:
-        """BM25 关键词检索（基于 SQLite LIKE + 简单评分）
+        """BM25 关键词检索（Okapi BM25 算法）
+
+        使用真正的 BM25 公式（IDF 加权 + 词频饱和 + 文档长度归一化），
+        替代原有 SQLite LIKE 简单打分。
 
         Args:
             db: 数据库会话
@@ -532,55 +539,32 @@ class RAGService:
         Returns:
             list of int: 按相关性排序的 knowledge_id 列表
         """
+        from app.services.bm25_service import bm25_index, ensure_bm25_index
         from app.models import Knowledge
         from app.models.knowledge import knowledge_tags
         from sqlalchemy import or_
 
-        # 提取关键词（jieba 中文分词 + 标点过滤）
-        keywords = _tokenize_keywords(question)
-        if not keywords:
-            return []
+        # 按需构建索引
+        ensure_bm25_index(db)
 
-        q = db.query(Knowledge)
-
-        # 状态过滤：仅检索 published 状态的知识（draft/archived 不可见）
-        q = q.filter(Knowledge.status == "published")
-
-        # Scope 过滤
+        # 解析 scope 限定
         category_ids = scope.get("category_ids", [])
         tag_ids = scope.get("tag_ids", [])
+
+        # 通过数据库构建 allowed_doc_ids（status=published + scope 过滤）
+        q = db.query(Knowledge.id).filter(Knowledge.status == "published")
         if category_ids:
             q = q.filter(Knowledge.category_id.in_(category_ids))
         if tag_ids:
             q = q.join(knowledge_tags).filter(knowledge_tags.c.tag_id.in_(tag_ids)).distinct()
+        allowed_ids = set(q.all())
 
-        # 关键词匹配
-        conditions = []
-        for kw in keywords:
-            esc_kw = kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append(Knowledge.title.like(f"%{esc_kw}%", escape="\\"))
-            conditions.append(Knowledge.content.like(f"%{esc_kw}%", escape="\\"))
-
-        if not conditions:
+        if not allowed_ids:
             return []
 
-        q = q.filter(or_(*conditions))
-        items = q.all()
-
-        # 简单评分：标题命中 = 2 分，内容命中 = 1 分
-        ranked = []
-        for k in items:
-            score = 0
-            for kw in keywords:
-                if kw in (k.title or ""):
-                    score += 2
-                if kw in (k.content or ""):
-                    score += 1
-            if score > 0:
-                ranked.append((k.id, score))
-
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        return [kid for kid, _ in ranked[:limit]]
+        # 真 BM25 检索
+        results = bm25_index.search(question, top_k=limit, allowed_doc_ids=allowed_ids)
+        return [kid for kid, _ in results]
 
     def _rrf_fuse(self, vec_ranked: list, bm25_ranked: list, k: int = RRF_K) -> list:
         """RRF (Reciprocal Rank Fusion) 融合两路检索结果
