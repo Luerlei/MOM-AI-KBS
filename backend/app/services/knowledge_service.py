@@ -57,6 +57,7 @@ def _to_out(k: Knowledge, include_index_status: bool = False) -> dict:
         "source_type": k.source_type,
         "source_file": k.source_file,
         "status": k.status or "published",
+        "parse_status": k.parse_status or "parsed",
         "tag_ids": [t.id for t in k.tags],
         "tag_names": [t.name for t in k.tags],
         "tags": [{"id": t.id, "name": t.name} for t in k.tags],
@@ -360,6 +361,187 @@ async def upload_files(db, files: list, category_id: int = None, tag_ids: list =
     if failed:
         logger.warning(f"[upload_files] {len(failed)} 个文件处理失败: {[f['filename'] for f in failed]}")
     return {"created": created, "skipped_duplicate": skipped_duplicate, "failed": failed}
+
+
+# ========== 知识库上传 + 解析状态机 ==========
+
+# 解析状态常量
+PARSE_PENDING = "pending"
+PARSE_PARSING = "parsing"
+PARSE_PARSED = "parsed"
+PARSE_FAILED = "failed"
+
+
+async def upload_files_to_kb(
+    db,
+    files: list,
+    knowledge_base_id: int,
+    category_id: int = None,
+    tag_ids: list = None,
+    auto_tag: bool = False,
+    parse_immediately: bool = True,
+):
+    """上传文件到知识库（支持文件夹上传，支持解析开关）
+
+    Args:
+        knowledge_base_id: 所属知识库 ID
+        parse_immediately: True=上传后立即解析，False=仅上传（parse_status=pending，待手动触发）
+    """
+    from app.services.file_parser import save_upload_file, get_file_type
+
+    existing_tags = db.query(Tag).all() if (tag_ids or auto_tag) else []
+    tag_id_set = set(tag_ids or [])
+
+    created = []
+    skipped_duplicate = []
+    failed = []
+    for upload_file in files:
+        filename = upload_file.filename or "unknown.txt"
+        # 文件夹上传时 filename 可能包含路径分隔符，取纯文件名
+        pure_filename = filename.replace("\\", "/").split("/")[-1]
+        try:
+            file_type = get_file_type(pure_filename)
+            if not file_type:
+                logger.warning(f"[upload_files_to_kb] 不支持的文件类型: {pure_filename}")
+                failed.append({"filename": pure_filename, "reason": "不支持的文件类型"})
+                continue
+            # 保存文件
+            file_path = save_upload_file(upload_file, pure_filename)
+            file_hash = _compute_file_hash(file_path)
+            if file_hash:
+                existing_doc = db.query(Document).filter(Document.file_hash == file_hash).first()
+                if existing_doc:
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+                    logger.info(f"[upload_files_to_kb] 跳过重复文件: {pure_filename}")
+                    skipped_duplicate.append(pure_filename)
+                    continue
+            # 创建知识条目（此时 content 为空，等待解析）
+            k = Knowledge(
+                title=os.path.splitext(pure_filename)[0],
+                content="",  # 未解析时内容为空
+                content_type="markdown",
+                source_type="upload",
+                source_file=pure_filename,
+                category_id=category_id,
+                knowledge_base_id=knowledge_base_id,
+                parse_status=PARSE_PENDING if not parse_immediately else PARSE_PARSING,
+                status=STATUS_DRAFT if not parse_immediately else STATUS_PUBLISHED,
+            )
+            db.add(k)
+            db.commit()
+            db.refresh(k)
+            # 记录文档
+            doc = Document(
+                filename=pure_filename,
+                file_path=file_path,
+                file_type=file_type,
+                file_size=os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+                file_hash=file_hash,
+                knowledge_id=k.id,
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(k)
+            # 预置标签
+            if tag_id_set:
+                for t in existing_tags:
+                    if t.id in tag_id_set:
+                        k.tags.append(t)
+                db.commit()
+                db.refresh(k)
+            # 立即解析模式：执行解析 + 同步索引 + 自动打标签
+            if parse_immediately:
+                try:
+                    await _do_parse_document(db, k.id, file_path, file_type)
+                    # 自动打标签（基于解析后的内容）
+                    if auto_tag:
+                        try:
+                            k = db.query(Knowledge).filter(Knowledge.id == k.id).first()
+                            assigned = await _auto_tag_knowledge(db, k, k.content, existing_tags)
+                            if assigned:
+                                db.refresh(k)
+                                for t in assigned:
+                                    if t not in existing_tags:
+                                        existing_tags.append(t)
+                        except Exception:
+                            logger.exception(f"[upload_files_to_kb] auto_tag 失败 knowledge_id={k.id}")
+                except Exception:
+                    logger.exception(f"[upload_files_to_kb] 解析失败 knowledge_id={k.id}")
+                    # 解析失败：更新状态，保留记录让用户可重试
+                    k = db.query(Knowledge).filter(Knowledge.id == k.id).first()
+                    if k:
+                        k.parse_status = PARSE_FAILED
+                        k.status = STATUS_DRAFT
+                        db.commit()
+            created.append(k)
+        except Exception:
+            db.rollback()
+            logger.exception(f"[upload_files_to_kb] 文件处理失败: {pure_filename}")
+            failed.append({"filename": pure_filename, "reason": "处理异常，详见日志"})
+    if skipped_duplicate:
+        logger.info(f"[upload_files_to_kb] 跳过 {len(skipped_duplicate)} 个重复文件")
+    if failed:
+        logger.warning(f"[upload_files_to_kb] {len(failed)} 个文件处理失败")
+    return {"created": created, "skipped_duplicate": skipped_duplicate, "failed": failed}
+
+
+async def _do_parse_document(db, knowledge_id: int, file_path: str, file_type: str):
+    """执行单个文档的解析（内部方法）
+
+    流程：读取文件 → 解析为文本 → 更新 content → 同步向量索引 → 更新 parse_status=parsed
+    """
+    from app.services.file_parser import parse_file
+    k = db.query(Knowledge).filter(Knowledge.id == knowledge_id).first()
+    if not k:
+        raise APIError("知识条目不存在", status_code=404)
+    # 标记解析中
+    k.parse_status = PARSE_PARSING
+    db.commit()
+    try:
+        # 解析文件
+        content = parse_file(file_path, file_type)
+        k.content = content or ""
+        k.parse_status = PARSE_PARSED
+        k.status = STATUS_PUBLISHED  # 解析成功后自动发布
+        db.commit()
+        db.refresh(k)
+        # 同步向量索引（捕获异常但不阻断 parse_status）
+        try:
+            await sync_vector_index(db, k.id)
+        except APIError:
+            # 未配置 Embedding 模型时跳过
+            pass
+        except Exception:
+            logger.exception(f"[_do_parse_document] 同步向量索引失败 knowledge_id={k.id}")
+    except Exception as e:
+        # 解析失败
+        k = db.query(Knowledge).filter(Knowledge.id == knowledge_id).first()
+        if k:
+            k.parse_status = PARSE_FAILED
+            k.status = STATUS_DRAFT
+            db.commit()
+        raise
+
+
+async def parse_single_document(db, knowledge_id: int):
+    """手动触发单个资料的解析
+
+    适用于 upload_files_to_kb(parse_immediately=False) 上传的资料。
+    """
+    k = db.query(Knowledge).filter(Knowledge.id == knowledge_id).first()
+    if not k:
+        raise APIError("知识条目不存在", status_code=404)
+    # 查找关联的 Document
+    doc = db.query(Document).filter(Document.knowledge_id == knowledge_id).first()
+    if not doc or not doc.file_path:
+        raise APIError("找不到关联的文件，无法解析", status_code=400)
+    if not os.path.exists(doc.file_path):
+        raise APIError(f"文件不存在: {doc.file_path}", status_code=400)
+    # 执行解析
+    await _do_parse_document(db, knowledge_id, doc.file_path, doc.file_type)
 
 
 async def _auto_tag_knowledge(db, knowledge, content: str, existing_tags: list):

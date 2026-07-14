@@ -117,12 +117,13 @@ def _tokenize_keywords(text: str) -> list:
 class RAGService:
     """RAG 检索增强生成服务"""
 
-    async def answer(self, question: str, skill, db, q_embedding: list = None, history: list = None) -> dict:
+    async def answer(self, question: str, skill, db, q_embedding: list = None, history: list = None, knowledge_base_ids: list = None) -> dict:
         """完整 RAG 流程
 
         Args:
             q_embedding: 预计算的查询向量（N8: 避免重复 Embedding 调用）。None 时内部计算。
             history: 对话历史 [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
+            knowledge_base_ids: 知识库 ID 列表（会话模式：仅检索这些知识库内的资料）
 
         Returns:
             dict: {answer, sources, token_input, token_output, duration_ms, degraded}
@@ -155,7 +156,7 @@ class RAGService:
                 logger.exception(f"[rag.answer] Embedding 失败 question={search_query[:50]}")
 
         # 混合检索（即使无 Embedding 也可走 BM25）
-        results = self._hybrid_search(q_vec, search_query, skill, db)
+        results = self._hybrid_search(q_vec, search_query, skill, db, knowledge_base_ids=knowledge_base_ids)
 
         # 相似度阈值过滤：丢弃低于阈值的低质量结果
         results, low_confidence = self._filter_by_relevance(results, degraded)
@@ -194,12 +195,13 @@ class RAGService:
             "low_confidence": low_confidence,
         }
 
-    async def answer_stream(self, question: str, skill, db, q_embedding: list = None, history: list = None) -> AsyncGenerator[dict, None]:
+    async def answer_stream(self, question: str, skill, db, q_embedding: list = None, history: list = None, knowledge_base_ids: list = None) -> AsyncGenerator[dict, None]:
         """流式 RAG 流程
 
         Args:
             q_embedding: 预计算的查询向量（N8: 避免重复 Embedding 调用）。None 时内部计算。
             history: 对话历史 [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
+            knowledge_base_ids: 知识库 ID 列表（会话模式：仅检索这些知识库内的资料）
 
         yield: dict with type field
         """
@@ -230,7 +232,7 @@ class RAGService:
                 logger.exception(f"[rag.answer_stream] Embedding 失败 question={search_query[:50]}")
 
         # 混合检索
-        results = self._hybrid_search(q_vec, search_query, skill, db)
+        results = self._hybrid_search(q_vec, search_query, skill, db, knowledge_base_ids=knowledge_base_ids)
 
         # 相似度阈值过滤：丢弃低于阈值的低质量结果
         results, low_confidence = self._filter_by_relevance(results, degraded)
@@ -436,7 +438,7 @@ class RAGService:
             return {"category_id": cat_strs[0]}
         return {"category_id": {"$in": cat_strs}}
 
-    def _hybrid_search(self, q_vec, question: str, skill, db, top_k: int = 5) -> list:
+    def _hybrid_search(self, q_vec, question: str, skill, db, top_k: int = 5, knowledge_base_ids: list = None) -> list:
         """混合检索：向量 + BM25 + RRF 融合
 
         Args:
@@ -445,6 +447,7 @@ class RAGService:
             skill: Skill 对象
             db: 数据库会话
             top_k: 最终返回的 chunk 数
+            knowledge_base_ids: 知识库 ID 列表（会话模式：仅检索这些知识库内的资料）
 
         Returns:
             list of dict: [{id, document, metadata, score}]
@@ -453,8 +456,20 @@ class RAGService:
         tag_ids = scope.get("tag_ids", [])
         where = self.get_search_scope(skill)
 
-        # 召回数：有 tag_ids 过滤时扩大召回
-        recall_k = top_k * 3 if tag_ids else top_k * 2
+        # 会话模式：按知识库 ID 过滤，先查出允许的 knowledge_id 集合
+        allowed_kids_by_kb = None
+        if knowledge_base_ids:
+            from app.models import Knowledge
+            kb_kids = db.query(Knowledge.id).filter(
+                Knowledge.knowledge_base_id.in_(knowledge_base_ids),
+                Knowledge.status == "published",
+            ).all()
+            allowed_kids_by_kb = set(kid for (kid,) in kb_kids)
+            if not allowed_kids_by_kb:
+                return []  # 知识库内无已发布资料
+
+        # 召回数：有过滤条件时扩大召回
+        recall_k = top_k * 3 if (tag_ids or knowledge_base_ids) else top_k * 2
 
         # 1. 向量检索
         vec_results = []
@@ -466,8 +481,15 @@ class RAGService:
             except Exception:
                 logger.exception(f"[rag._hybrid_search] 向量检索失败")
 
+        # 会话模式：向量结果按 knowledge_id 过滤
+        if allowed_kids_by_kb is not None:
+            vec_results = [
+                r for r in vec_results
+                if int(r.get("metadata", {}).get("knowledge_id", 0) or 0) in allowed_kids_by_kb
+            ]
+
         # 2. BM25 关键词检索
-        bm25_kids = self._bm25_search(db, question, scope, limit=recall_k)
+        bm25_kids = self._bm25_search(db, question, scope, limit=recall_k, allowed_kids=allowed_kids_by_kb)
 
         # 3. 合并：knowledge_id → best chunk
         kid_to_chunk = {}
@@ -524,7 +546,7 @@ class RAGService:
 
         return result
 
-    def _bm25_search(self, db, question: str, scope: dict, limit: int = 10) -> list:
+    def _bm25_search(self, db, question: str, scope: dict, limit: int = 10, allowed_kids: set = None) -> list:
         """BM25 关键词检索（Okapi BM25 算法）
 
         使用真正的 BM25 公式（IDF 加权 + 词频饱和 + 文档长度归一化），
@@ -535,6 +557,7 @@ class RAGService:
             question: 用户问题
             scope: {"category_ids": [], "tag_ids": []}
             limit: 最多返回的 knowledge_id 数
+            allowed_kids: 外部传入的允许 knowledge_id 集合（会话模式用，优先于 scope）
 
         Returns:
             list of int: 按相关性排序的 knowledge_id 列表
@@ -547,17 +570,20 @@ class RAGService:
         # 按需构建索引
         ensure_bm25_index(db)
 
-        # 解析 scope 限定
-        category_ids = scope.get("category_ids", [])
-        tag_ids = scope.get("tag_ids", [])
-
-        # 通过数据库构建 allowed_doc_ids（status=published + scope 过滤）
-        q = db.query(Knowledge.id).filter(Knowledge.status == "published")
-        if category_ids:
-            q = q.filter(Knowledge.category_id.in_(category_ids))
-        if tag_ids:
-            q = q.join(knowledge_tags).filter(knowledge_tags.c.tag_id.in_(tag_ids)).distinct()
-        allowed_ids = set(q.all())
+        # 会话模式：外部传入 allowed_kids 优先
+        if allowed_kids is not None:
+            allowed_ids = allowed_kids
+        else:
+            # 解析 scope 限定
+            category_ids = scope.get("category_ids", [])
+            tag_ids = scope.get("tag_ids", [])
+            # 通过数据库构建 allowed_doc_ids（status=published + scope 过滤）
+            q = db.query(Knowledge.id).filter(Knowledge.status == "published")
+            if category_ids:
+                q = q.filter(Knowledge.category_id.in_(category_ids))
+            if tag_ids:
+                q = q.join(knowledge_tags).filter(knowledge_tags.c.tag_id.in_(tag_ids)).distinct()
+            allowed_ids = set(kid for (kid,) in q.all())
 
         if not allowed_ids:
             return []

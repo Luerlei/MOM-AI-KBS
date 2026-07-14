@@ -25,6 +25,10 @@ class Knowledge(Base):
     source_type = Column(String(20), default="manual", comment="来源：upload/manual")
     source_file = Column(String(255), nullable=True, comment="原始文件名")
     status = Column(String(20), default="published", comment="状态: draft(草稿)/published(发布)/archived(归档)")
+    # 知识库归属（nullable，兼容旧数据；新建知识库内资料时必填）
+    knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id", ondelete="SET NULL"), nullable=True, comment="所属知识库 ID（空表示未归属）")
+    # 解析状态（与 status 解耦：管理文件解析流程；status 管理发布可见性）
+    parse_status = Column(String(20), default="parsed", comment="解析状态: pending(待解析)/parsing(解析中)/parsed(已解析)/failed(解析失败)")
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
     updated_at = Column(String, default=lambda: datetime.utcnow().isoformat(), onupdate=lambda: datetime.utcnow().isoformat())
 

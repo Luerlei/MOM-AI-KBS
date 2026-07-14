@@ -105,7 +105,7 @@ class DeepSeekOCRBackend(PDFParserBackend):
                 ]
             }],
             "temperature": 0.1,
-            "max_tokens": 8192,
+            "max_tokens": 4096,
         }
 
         try:

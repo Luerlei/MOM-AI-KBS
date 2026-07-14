@@ -26,6 +26,24 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '知识列表', breadcrumb: ['首页', '知识管理'] }
       },
       {
+        path: 'knowledge-base',
+        name: 'KnowledgeBaseList',
+        component: () => import('@/views/knowledge-base/List.vue'),
+        meta: { title: '知识库管理', breadcrumb: ['首页', '知识库管理'] }
+      },
+      {
+        path: 'knowledge-base/detail/:id',
+        name: 'KnowledgeBaseDetail',
+        component: () => import('@/views/knowledge-base/Detail.vue'),
+        meta: { title: '知识库详情', breadcrumb: ['首页', '知识库管理', '详情'] }
+      },
+      {
+        path: 'conversation',
+        name: 'Conversation',
+        component: () => import('@/views/conversation/Conversation.vue'),
+        meta: { title: '会话问答', breadcrumb: ['首页', '会话问答'] }
+      },
+      {
         path: 'knowledge/upload',
         name: 'KnowledgeUpload',
         component: () => import('@/views/knowledge/Upload.vue'),

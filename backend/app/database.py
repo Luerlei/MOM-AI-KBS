@@ -28,7 +28,7 @@ def get_db():
 
 def init_db():
     """初始化数据库（建表）"""
-    from app.models import knowledge, category, tag, document, skill, model_config, qa_history, token_usage, search_history, dataset, forecast_task, knowledge_status_log  # noqa: F401
+    from app.models import knowledge, category, tag, document, skill, model_config, qa_history, token_usage, search_history, dataset, forecast_task, knowledge_status_log, knowledge_base, conversation  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _auto_migrate()
 
@@ -63,6 +63,8 @@ def _auto_migrate():
         ],
         "knowledge": [
             ("status", "VARCHAR(20) DEFAULT 'published'"),
+            ("knowledge_base_id", "INTEGER"),
+            ("parse_status", "VARCHAR(20) DEFAULT 'parsed'"),
         ],
         "skills": [
             ("enable_query_rewrite", "INTEGER DEFAULT 0"),

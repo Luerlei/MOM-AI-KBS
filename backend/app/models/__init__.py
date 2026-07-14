@@ -2,6 +2,8 @@
 from app.models.category import Category
 from app.models.tag import Tag
 from app.models.knowledge import Knowledge, KnowledgeTag
+from app.models.knowledge_base import KnowledgeBase
+from app.models.conversation import Conversation, ConversationMessage
 from app.models.document import Document
 from app.models.skill import Skill
 from app.models.skill_option import SkillOption
@@ -16,6 +18,7 @@ from app.models.knowledge_status_log import KnowledgeStatusLog
 
 __all__ = [
     "Category", "Tag", "Knowledge", "KnowledgeTag", "Document",
+    "KnowledgeBase", "Conversation", "ConversationMessage",
     "Skill", "SkillOption", "ModelConfig", "QAHistory", "TokenUsage", "SearchHistory",
     "Dataset", "ForecastTask", "ForecastResult", "DatasetCovariate",
     "KnowledgeStatusLog",

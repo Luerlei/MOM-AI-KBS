@@ -160,6 +160,16 @@ const menuItems = computed<ItemType[]>(() => [
     label: '首页'
   },
   {
+    key: '/knowledge-base',
+    icon: () => h(DatabaseOutlined),
+    label: '知识库'
+  },
+  {
+    key: '/conversation',
+    icon: () => h(MessageOutlined),
+    label: '会话问答'
+  },
+  {
     key: '/knowledge',
     icon: () => h(FileTextOutlined),
     label: '知识管理',

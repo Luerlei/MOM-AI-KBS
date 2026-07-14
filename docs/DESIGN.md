@@ -1,6 +1,6 @@
 # MOM 系统 AI 知识库平台 — 设计书
 
-> **版本**：v0.8 | **更新日期**：2026-07-14 | **状态**：活跃维护中
+> **版本**：v0.9 | **更新日期**：2026-07-14 | **状态**：活跃维护中
 
 ---
 
@@ -23,6 +23,8 @@
 - [15. 用户文档与演示数据（v0.7 新增）](#15-用户文档与演示数据v07-新增)
 - [16. OCR/VLM 深度文档解析（v0.8 新增）](#16-ocrvlm-深度文档解析v08-新增)
 - [17. 性能优化（v0.8 新增）](#17-性能优化v08-新增)
+- [18. 知识库管理（v0.9 新增）](#18-知识库管理v09-新增)
+- [19. 会话管理（v0.9 新增）](#19-会话管理v09-新增)
 
 ---
 
@@ -45,6 +47,8 @@
 | 用户文档 | **完整使用说明书 + 演示实例数据 + 实例问题对照表（v0.7 新增）** |
 | 深度文档解析 | **DeepSeek-OCR / VLM 视觉解析 + PyPDF2 兜底（v0.8 新增）** |
 | 引用溯源 | **检索结果携带 chunk_id + page_number，前端展示来源页码（v0.8 新增）** |
+| 知识库管理 | **多知识库容器、独立模型配置、批量上传 + 解析状态机（v0.9 新增）** |
+| 会话管理 | **ChatGPT 风格多轮对话、会话关联知识库限定检索范围（v0.9 新增）** |
 
 ### 1.3 设计原则
 
@@ -71,7 +75,7 @@
 ┌─────────────────────────┴───────────────────────────────────┐
 │                  后端 (FastAPI + Python 3.9)                │
 │  ┌──────────┐  ┌──────────┐  ┌───────────────────────────┐ │
-│  │ 14 路由  │→ │ 21 服务  │→ │   数据访问层 (SQLAlchemy)   │ │
+│  │ 16 路由  │→ │ 23 服务  │→ │   数据访问层 (SQLAlchemy)   │ │
 │  │ /api/*   │  │ 业务逻辑 │  │  SQLite + ChromaDB        │ │
 │  └──────────┘  └────┬─────┘  └───────────────────────────┘ │
 │                       │                                     │
@@ -101,14 +105,15 @@
 表现层    │ Vue 3 页面 + 组件 + 路由
          │ 统一 API 封装（axios + 拦截器 + SSE）
 ──────────┼────────────────────────────────
-接口层    │ FastAPI 路由（14 个模块）
+接口层    │ FastAPI 路由（16 个模块）
          │ JWT 认证依赖 + 统一响应格式 + 全局异常处理
 ──────────┼────────────────────────────────
-业务层    │ 21 个 Service
+业务层    │ 23 个 Service
          │ RAG / Skill路由 / 缓存 / 向量存储 / 预测 / 文件解析
          │ 协变量管理 / 知识状态审计（v0.6）/ BM25 索引 / PDF 解析后端（v0.8）
+         │ 知识库管理 / 会话管理（v0.9）
 ──────────┼────────────────────────────────
-数据层    │ SQLAlchemy ORM（15 模型）+ ChromaDB（向量）
+数据层    │ SQLAlchemy ORM（19 模型）+ ChromaDB（向量）
          │ SQLite 持久化 + 自动迁移 + BM25 内存倒排索引（v0.8）
 ──────────┼────────────────────────────────
 抽象层    │ LLMClient / OpenAICompatibleClient / ForecastClient
@@ -218,11 +223,15 @@ LLM Wiki/
 │   │   │   ├── token_stats.py        # Token 统计
 │   │   │   ├── dataset.py            # 数据集管理
 │   │   │   ├── forecast.py           # 时序预测（含协变量支持）★
-│   │   │   └── covariate.py          # ★ v0.6 新增：协变量管理
+│   │   │   ├── covariate.py          # ★ v0.6 新增：协变量管理
+│   │   │   ├── knowledge_base.py     # ★ v0.9 新增：知识库管理
+│   │   │   └── conversation.py       # ★ v0.9 新增：会话管理
 │   │   ├── schemas/                  # Pydantic 验证模型
-│   │   ├── services/                 # 21 个业务服务
+│   │   │   ├── knowledge_base.py     # ★ v0.9 新增
+│   │   │   └── conversation.py       # ★ v0.9 新增
+│   │   ├── services/                 # 23 个业务服务
 │   │   │   ├── llm_client.py         # LLM 客户端抽象层（含 OCRClient ★v0.8）
-│   │   │   ├── rag_service.py        # RAG 检索增强（真 BM25 ★v0.8）
+│   │   │   ├── rag_service.py        # RAG 检索增强（真 BM25 ★v0.8 + 按知识库检索 ★v0.9）
 │   │   │   ├── qa_service.py         # 问答服务（含缓存）★
 │   │   │   ├── skill_router.py       # Skill 三级路由 ★
 │   │   │   ├── cache_service.py      # 向量相似度缓存
@@ -231,7 +240,9 @@ LLM Wiki/
 │   │   │   ├── forecast_service.py   # 时序预测（含协变量接入）★
 │   │   │   ├── covariate_service.py  # ★ v0.6 新增：协变量管理
 │   │   │   ├── dataset_service.py    # 数据集管理
-│   │   │   ├── knowledge_service.py  # 知识管理 + 状态审计 + 索引同步（含 chunk_id/page_number ★v0.8）
+│   │   │   ├── knowledge_service.py  # 知识管理 + 状态审计 + 索引同步（含 KB 上传/解析 ★v0.9）
+│   │   │   ├── knowledge_base_service.py # ★ v0.9 新增：知识库管理（独立模型配置）
+│   │   │   ├── conversation_service.py   # ★ v0.9 新增：会话管理（多轮对话 + 历史持久化）
 │   │   │   ├── search_service.py     # 语义 + 关键词搜索
 │   │   │   ├── prompt_assembler.py   # Prompt 组装
 │   │   │   ├── file_parser.py        # 文件解析（含 PDF 后端选择 ★v0.8）
@@ -381,10 +392,14 @@ LLM Wiki/
 | 13 | Dataset | datasets | 时序数据集 | |
 | 14 | ForecastTask + ForecastResult | forecast_tasks / forecast_results | 预测任务和结果 | |
 | 15 | DatasetCovariate | dataset_covariates | **数据集协变量（外生变量）** | ★ v0.6 新增 |
+| 16 | KnowledgeBase | knowledge_bases | **知识库（顶层容器，独立模型配置）** | ★ v0.9 新增 |
+| 17 | Conversation | conversations | **会话（关联多个知识库）** | ★ v0.9 新增 |
+| 18 | ConversationMessage | conversation_messages | **会话消息（多轮对话历史）** | ★ v0.9 新增 |
+| 19 | conversation_knowledge_bases | conversation_knowledge_bases | **会话-知识库多对多关联** | ★ v0.9 新增 |
 
 ### 5.3 关键字段说明
 
-#### Knowledge（v0.6 增强状态字段）
+#### Knowledge（v0.6 增强状态字段，v0.9 增强知识库归属与解析状态）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -395,7 +410,49 @@ LLM Wiki/
 | category_id | Integer FK | 分类 |
 | source_type | String(20) | 来源 |
 | **status** | String(20) | **状态：draft/published/archived（v0.6 新增，默认 published）** |
+| **knowledge_base_id** | Integer FK | **所属知识库（v0.9 新增，SET NULL，空=未归属兼容旧数据）** |
+| **parse_status** | String(20) | **解析状态：pending/parsing/parsed/failed（v0.9 新增，默认 parsed）** |
 | created_at / updated_at | String | 时间戳 |
+
+#### KnowledgeBase（★ v0.9 新增）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer PK | 主键 |
+| name | String(200) | 知识库名称 |
+| description | Text | 描述 |
+| llm_config_id | Integer FK (SET NULL) | LLM 配置（空则继承全局） |
+| embedding_config_id | Integer FK (SET NULL) | Embedding 配置（空则继承全局） |
+| rerank_config_id | Integer FK (SET NULL) | Rerank 配置（空则继承全局） |
+| ocr_config_id | Integer FK (SET NULL) | OCR 配置（空则继承全局） |
+| vlm_config_id | Integer FK (SET NULL) | VLM 配置（空则继承全局） |
+| parse_on_upload | Boolean | 上传时是否立即解析（默认 True） |
+| created_at / updated_at | String | 时间戳 |
+
+#### Conversation（★ v0.9 新增）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer PK | 主键 |
+| title | String(200) | 会话标题 |
+| description | Text | 描述 |
+| knowledge_bases | M2M relationship | 关联知识库（多对多，conversation_knowledge_bases 关联表） |
+| messages | 一对多 relationship | 会话消息（cascade delete-orphan） |
+| created_at / updated_at | String | 时间戳 |
+
+#### ConversationMessage（★ v0.9 新增）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | Integer PK | 主键 |
+| conversation_id | Integer FK (CASCADE) | 所属会话 |
+| role | String(20) | user / assistant |
+| content | Text | 消息内容 |
+| sources_json | Text | 引用来源 JSON（默认 "[]"） |
+| token_input / token_output | Integer | token 用量 |
+| duration_ms | Integer | 耗时毫秒 |
+| model_name | String(100) | 使用的模型名称 |
+| created_at | String | 时间戳 |
 
 #### DatasetCovariate（★ v0.6 新增）
 
@@ -466,6 +523,8 @@ LLM Wiki/
 | 数据集 | /api/datasets | CRUD + import + export + preview + template | |
 | 时序预测 | /api/forecast | predict + tasks + results + cross-validation + compare-models + **statistical-forecast（含协变量）** + decomposition + export | ★ v0.6 协变量支持 |
 | **协变量管理** | /api/datasets/{id}/covariates + /api/covariates/{id} | list + create + update + delete + **auto-generate** + preview + future-times | ★ v0.6 新增 |
+| **知识库管理** | /api/knowledge-bases | CRUD + documents + upload（含文件夹）+ parse（单个/批量） | ★ v0.9 新增 |
+| **会话管理** | /api/conversations | CRUD + **ask(SSE 流式问答)** + clear-messages | ★ v0.9 新增 |
 
 ### 6.2 服务层核心设计
 
@@ -510,14 +569,19 @@ ModelManager (单例)
 **混合检索 + RRF 融合**：
 
 ```
-_hybrid_search(question, skill, db)
+_hybrid_search(question, skill, db, knowledge_base_ids=None)  # ★v0.9 新增 knowledge_base_ids
+  │
+  ├─ 若 knowledge_base_ids 非空（会话模式）：
+  │   ├─ 查 Knowledge.id where knowledge_base_id IN (...) AND status='published'
+  │   ├─ 构建 allowed_kids_by_kb 集合
+  │   └─ 空集 → 直接返回 []（知识库内无已发布资料）
   │
   ├─ 向量检索：vector_store.search(q_vec, where=scope, top_k=N)
+  │   └─ 会话模式按 allowed_kids_by_kb 过滤结果，recall_k 扩大到 top_k*3
   │
-  ├─ BM25 检索：_bm25_search(db, question, scope)  # 真 Okapi BM25（v0.8 升级）
-  │   ├─ ensure_bm25_index(db)  # 按需构建（首次查询触发）
-  │   ├─ 通过 SQL 取 allowed_doc_ids（status=published + scope 过滤）
-  │   └─ bm25_index.search(question, top_k, allowed_doc_ids)
+  ├─ BM25 检索：_bm25_search(db, question, scope, allowed_kids=allowed_kids_by_kb)
+  │   ├─ allowed_kids 非空时优先使用（会话模式），覆盖原 scope 过滤
+  │   └─ 否则按原 scope 逻辑构建 allowed_doc_ids
   │
   ├─ 合并：knowledge_id → best chunk
   │
@@ -529,6 +593,8 @@ _hybrid_search(question, skill, db)
 **v0.6 优化**：RAG 检索仅匹配 `status=published` 的知识（非 published 状态的知识不参与检索）。
 
 **v0.8 优化**：BM25 由原 SQLite LIKE 简单打分升级为真 Okapi BM25 算法（IDF 加权 + 词频饱和 k1=1.5 + 文档长度归一化 b=0.75），内存倒排索引 + 增量更新；检索结果 metadata 增加 `chunk_id` 和 `page_number` 用于引用溯源。
+
+**v0.9 优化**：`answer()` / `answer_stream()` 全链路新增 `knowledge_base_ids` 参数，会话模式下仅检索关联知识库内 `status=published` 的知识，实现知识库级检索隔离。
 
 #### 6.2.3 Skill 路由（skill_router.py）
 
@@ -1008,6 +1074,7 @@ python scripts/seed_demo_data.py   # 注入 5 条匹配各 Skill 的示例知识
 | **v0.6** | 2026-07-12 | **强化 AI 知识库功能，强化趋势预测：新增协变量系统（外生变量）、知识状态生命周期管理（draft/published/archived + 审计日志）、ARIMA/Prophet 协变量接入、中国节假日数据集** |
 | **v0.7** | 2026-07-13 | **小批量修复：新增用户使用说明书（USER_GUIDE.md）、演示数据注入脚本（seed_demo_data.py）、seed_service 预制 5 条示例知识、Trends/Covariates/dataset/List/CategoryTree 页面 bug 修复、设计书同步更新至 v0.7** |
 | **v0.8** | 2026-07-14 | **增加 OCR/VLM 模型支持 + 性能优化：新增 PDF 解析后端抽象层（PyPDF2/DeepSeek-OCR/VLM 三后端 + 兜底降级）、OCRClient 客户端与 get_active_ocr、真 Okapi BM25 算法（bm25_service 内存倒排索引）、text_chunker 段落感知+句子边界+滑动窗口升级、引用溯源（chunk_id + page_number 写入向量库 metadata，前端展示页码徽章）、预制 3 个辅助模型配置（Rerank/OCR/VLM）、OCR/VLM 连通测试（2xx 和 400/422 均算成功）** |
+| **v0.9** | 2026-07-14 | **增加知识库管理 + 会话管理：新增 KnowledgeBase 模型（顶层容器，独立配置 LLM/Embedding/Rerank/OCR/VLM，空则继承全局）、Conversation + ConversationMessage 模型（多轮对话 + 历史持久化）、conversation_knowledge_bases 多对多关联（会话关联知识库限定检索范围）、rag_service 全链路新增 knowledge_base_ids 参数实现按知识库检索隔离、Knowledge 新增 knowledge_base_id + parse_status 字段 + 解析状态机（pending/parsing/parsed/failed）、knowledge_service 新增 KB 专用上传/解析流程、会话 SSE 流式问答端点（复用 rag_service 不走 Skill 路由）、前端知识库列表/详情页 + ChatGPT 风格会话页** |
 
 ---
 
@@ -1290,4 +1357,142 @@ sync_vector_index(db, knowledge_id)
 
 ---
 
-*本文档基于 v0.8 代码库实际架构生成。*
+## 18. 知识库管理（v0.9 新增）
+
+### 18.1 设计动机
+
+原架构中所有 Knowledge 资料平铺在同一层，无法按业务域（如"设备手册库"、"质量标准库"）隔离，且所有资料共享全局模型配置。v0.9 引入 KnowledgeBase 顶层容器，实现：按业务域组织资料、独立配置模型、会话级检索隔离。
+
+### 18.2 数据模型与关系
+
+```
+KnowledgeBase（顶层容器）
+├── 独立配置：llm_config_id / embedding_config_id / rerank_config_id / ocr_config_id / vlm_config_id
+│   └── 空 = 继承全局 ModelConfig（ModelManager.get_active_*）
+├── parse_on_upload：上传时是否立即解析
+│
+└── 一对多 → Knowledge（资料条目）
+    ├── knowledge_base_id（FK, SET NULL，空=未归属兼容旧数据）
+    ├── status：draft/published/archived（发布可见性）
+    └── parse_status：pending/parsing/parsed/failed（解析状态机）★v0.9
+
+删除知识库 → 关联资料 knowledge_base_id 置 NULL（资料保留）
+```
+
+### 18.3 解析状态机
+
+```
+上传文件
+  │
+  ├─ parse_on_upload=True → parse_status=parsing → 解析成功 → parse_status=parsed + status=published
+  │                                            → 解析失败 → parse_status=failed + status=draft
+  │
+  └─ parse_on_upload=False → parse_status=pending + content="" + status=draft
+      │
+      └─ 手动触发解析（单个/批量）→ parsing → parsed/failed
+```
+
+**status 与 parse_status 解耦**：前者管发布可见性（是否被检索/索引），后者管文件解析流程。
+
+### 18.4 API 端点（/api/knowledge-bases）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | / | 知识库分页列表（keyword/page/page_size） |
+| GET | /{kb_id} | 知识库详情（含 document_count + 5 个模型名称） |
+| POST | / | 创建知识库 |
+| PUT | /{kb_id} | 更新知识库 |
+| DELETE | /{kb_id} | 删除知识库（关联资料解除归属，不删除） |
+| GET | /{kb_id}/documents | 知识库资料列表（可按 parse_status/keyword 筛选） |
+| POST | /{kb_id}/upload | 上传资料（多文件+文件夹，支持 parse_immediately 开关） |
+| POST | /{kb_id}/documents/{kid}/parse | 手动触发单个资料解析 |
+| POST | /{kb_id}/parse-all | 批量解析所有 pending/failed 资料 |
+
+### 18.5 服务层核心方法（knowledge_base_service.py）
+
+- `get_model_config_id(db, kb_id, model_type)`：按类型返回 KB 的模型配置 ID（空返回 None，调用方继承全局）—— per-KB 模型配置取值入口
+- `_to_out(kb, doc_count)`：输出格式化，附带 5 个模型名称 + document_count
+- `delete`：解除关联（Knowledge.knowledge_base_id 置 NULL）再删知识库
+
+### 18.6 知识服务扩展（knowledge_service.py）
+
+- `upload_files_to_kb(...)`：知识库专用上传，支持文件夹（取纯文件名）、`parse_immediately` 开关
+- `_do_parse_document(...)`：解析 → 更新 content → `parse_status=parsed` + `status=published` → 同步向量索引
+- `parse_single_document(db, kid)`：手动触发解析（查关联 Document.file_path）
+
+### 18.7 前端页面
+
+- `knowledge-base/List.vue`：卡片式知识库列表，含搜索、分页、新建/编辑弹窗（5 类模型下拉 + parse_on_upload 开关）、删除
+- `knowledge-base/Detail.vue`：知识库详情页，含信息卡（5 类模型名称）+ 资料列表表格 + 上传弹窗（拖拽+文件夹上传）+ 解析操作（单个/批量/全部）+ 解析状态筛选
+
+---
+
+## 19. 会话管理（v0.9 新增）
+
+### 19.1 设计动机
+
+原「智能问答」走 Skill 路由，按 Skill 的 knowledge_scope 限定检索范围，适合单轮或简单多轮。v0.9 新增 ChatGPT 风格会话管理，支持完整多轮对话历史上下文、会话关联多个知识库限定检索范围、引用溯源。
+
+### 19.2 数据模型
+
+```
+Conversation（会话）
+├── title / description
+├── knowledge_bases ←M2M→ KnowledgeBase（conversation_knowledge_bases 关联表）
+└── messages → ConversationMessage（一对多，cascade delete-orphan）
+    ├── role: user / assistant
+    ├── content
+    ├── sources_json：引用来源 JSON
+    ├── token_input / token_output / duration_ms / model_name
+    └── created_at
+```
+
+### 19.3 与智能问答的集成（核心）
+
+`POST /api/conversations/{conv_id}/ask` 是 SSE 流式端点：
+
+```
+1. 取会话关联的 kb_ids（空则报 400）
+2. get_history(conv_id, turns=6)  # 取最近 N 轮消息
+3. 持久化用户消息 ConversationMessage(role=user)
+4. 构造内存 dummy Skill（id=0, 空 scope, 不走 Skill 路由）
+   └─ system_prompt="你是一个专业的知识库助手..."
+   └─ knowledge_scope="[]"（空 scope，禁用分类/标签过滤）
+   └─ enable_query_rewrite=False, context_turns=data.history_turns
+5. rag_service.answer_stream(question, skill=dummy_skill, db, history, knowledge_base_ids=kb_ids)
+   └─ dummy Skill 空 scope 使原 scope 过滤失效，仅 knowledge_base_ids 生效
+6. SSE 事件流：sources（含 degraded/low_confidence）→ chunks → done（含 answer/sources/token/model）
+7. finally 持久化 assistant 回复 + 记录 TokenUsage（call_type="conversation"）
+```
+
+**关键设计**：会话模式复用 `rag_service.answer_stream` 接口，通过 `knowledge_base_ids` 参数实现范围隔离，不走 Skill 路由的三级匹配。
+
+### 19.4 API 端点（/api/conversations）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | / | 会话列表（keyword/page/page_size） |
+| GET | /{conv_id} | 会话详情（含消息历史） |
+| POST | / | 创建会话（关联 knowledge_base_ids） |
+| PUT | /{conv_id} | 更新会话 |
+| DELETE | /{conv_id} | 删除会话（消息级联删除） |
+| POST | /{conv_id}/ask | 会话内 SSE 流式问答 |
+| DELETE | /{conv_id}/messages | 清空会话消息历史 |
+
+### 19.5 服务层核心方法（conversation_service.py）
+
+- `get_history(db, conv_id, turns=6)`：取最近 N 轮消息，倒序查后 reverse 恢复时序
+- `add_message(...)`：写入一条消息（含 sources_json、token、耗时、模型名）
+- `get_kb_ids(db, conv_id)`：获取会话关联的知识库 ID 列表
+
+### 19.6 前端页面
+
+`conversation/Conversation.vue`：类 ChatGPT 双栏布局
+- **左栏**：会话列表（标题 + 关联知识库 tag + 消息数 + 时间）、搜索、新建会话弹窗（标题/描述/多选知识库）、删除
+- **右栏**：聊天区，顶部显示标题+关联知识库 tag+清空消息按钮；消息列表区分 user/AI 气泡；AI 回复支持 Markdown 渲染、`[1][2]` 角标转可点击 cite-badge（跳转知识详情）、参考来源卡片（含页码/分数/片段）、降级模式提示、低置信度提示
+- **输入区**：流式发送/停止（AbortController）
+- **SSE 解析**：`askInConversation` 用 fetch + ReadableStream 手动解析 SSE，支持 onSources/onMessage/onDone/onError/signal 回调
+
+---
+
+*本文档基于 v0.9 代码库实际架构生成。*

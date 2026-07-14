@@ -777,6 +777,99 @@ export interface CovariatePreview {
   point_count: number
 }
 
+// ========== 知识库管理 ==========
+
+/**
+ * 知识库
+ */
+export interface KnowledgeBase {
+  id: number
+  name: string
+  description: string
+  llm_config_id: number | null
+  embedding_config_id: number | null
+  rerank_config_id: number | null
+  ocr_config_id: number | null
+  vlm_config_id: number | null
+  parse_on_upload: boolean
+  llm_model_name?: string | null
+  embedding_model_name?: string | null
+  rerank_model_name?: string | null
+  ocr_model_name?: string | null
+  vlm_model_name?: string | null
+  document_count: number
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * 知识库表单
+ */
+export interface KnowledgeBaseForm {
+  name: string
+  description?: string
+  llm_config_id?: number | null
+  embedding_config_id?: number | null
+  rerank_config_id?: number | null
+  ocr_config_id?: number | null
+  vlm_config_id?: number | null
+  parse_on_upload?: boolean
+}
+
+/**
+ * 解析状态
+ */
+export type ParseStatus = 'pending' | 'parsing' | 'parsed' | 'failed'
+
+// ========== 会话管理 ==========
+
+/**
+ * 会话消息
+ */
+export interface ConversationMessage {
+  id: number
+  conversation_id: number
+  role: 'user' | 'assistant'
+  content: string
+  sources: QAReference[]
+  token_input: number
+  token_output: number
+  duration_ms: number
+  model_name?: string | null
+  created_at: string
+}
+
+/**
+ * 会话
+ */
+export interface Conversation {
+  id: number
+  title: string
+  description: string
+  knowledge_base_ids: number[]
+  knowledge_base_names: string[]
+  message_count: number
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * 会话表单
+ */
+export interface ConversationForm {
+  title: string
+  description?: string
+  knowledge_base_ids?: number[]
+}
+
+/**
+ * 会话详情（含消息历史）
+ */
+export interface ConversationDetail extends Conversation {
+  messages: ConversationMessage[]
+}
+
+
 /**
  * 自动生成协变量响应
  */
